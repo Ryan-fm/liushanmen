@@ -70,6 +70,8 @@ const ICON_PATHS = {
   search: '<circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 4 4"/>',
   memory: '<rect x="5" y="4" width="14" height="16" rx="2"/><path d="M9 8h6m-6 4h6m-6 4h3"/>',
   inbox: '<path d="M4 5h16v13H4zM4 13h4l2 2h4l2-2h4"/>',
+  bell: '<path d="M18 8a6 6 0 0 0-12 0v5l-2 3h16l-2-3V8Zm-8 11a2 2 0 0 0 4 0"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
   check: '<path d="m5 12 4 4L19 6"/>',
   chevron: '<path d="m6 9 6 6 6-6"/>',
 };
@@ -172,13 +174,14 @@ async function refresh({ focus = false, editedRules = null } = {}) {
     closeMenu();
   }
   try {
-    const [{ tasks: allTasks }, task, evidence, insights, memories, inbox] = await Promise.all([
+    const [{ tasks: allTasks }, task, evidence, insights, memories, inbox, delivery] = await Promise.all([
       api("/api/tasks"),
       route.name === "task" ? api(apiTask(route.id)) : Promise.resolve(null),
       route.tab === "sources" ? api(apiTask(route.id) + "/evidence") : Promise.resolve(null),
       route.tab === "summary" ? api(apiTask(route.id) + "/insights") : Promise.resolve(null),
       route.tab === "summary" ? api(apiTask(route.id) + "/memory") : Promise.resolve({ notes: [] }),
       route.name === "inbox" ? api("/api/inbox") : Promise.resolve(null),
+      route.name === "inbox" ? api("/api/delivery") : Promise.resolve(null),
     ]);
     if (sequence !== state.sequence) return;
     const userTasks = allTasks.filter(item => !item.demo);
@@ -195,7 +198,7 @@ async function refresh({ focus = false, editedRules = null } = {}) {
     nav(tasks, route, task?.plan.title);
     if (route.name === "home") renderHome(userTasks);
     else if (route.name === "overview") renderOverview();
-    else if (route.name === "inbox") renderInbox(inbox);
+    else if (route.name === "inbox") renderInbox(inbox, delivery);
     else if (route.name === "events") renderEvents(events);
     else renderTask(task, route, { evidence, editedRules, insights });
     if (route.name === "overview" && focusComposerOnLoad) {
@@ -525,13 +528,17 @@ async function requestPlan(form) {
   }
 }
 
-function renderInbox(inbox) {
+function renderInbox(inbox, delivery) {
   const priority = inbox.stories.filter(story => story.priority || story.focus.length).length;
   const failed = inbox.failures.filter(source => !source.recovered_at).length;
   page.innerHTML = `<div class="inbox-title page-title">
     <div><p class="inbox-date">${icon("clock")} <time datetime="${escape(inbox.date)}">${escape(inbox.date)}</time> ${t("北京时间")}</p>
       <h1>${t("今日情报收件箱")}</h1><p>${t("关注任务的当日报道与事件更新。")}</p></div>
-    ${button(t("刷新收件箱"), "refresh-inbox")}
+    <div class="row task-actions">
+      ${delivery.latest_day ? `<a class="button" href="/api/briefings/latest" download>${t("下载最新简报")}</a>` : ""}
+      ${button(icon("bell") + t("提醒与简报"), "delivery-settings")}
+      ${button(t("刷新收件箱"), "refresh-inbox")}
+    </div>
   </div>
   <div class="overview-metrics" aria-label="${t("今日概况")}">
     ${metric("inbox", t("今日进展"), inbox.stories.length)}
@@ -619,10 +626,10 @@ function renderTask(task, route, { evidence, editedRules, insights }) {
   const tab = route.tab;
   const activeTab = tab === "event" ? "summary" : tab;
   const tabs = { summary: t("研判概览"), rules: t("监测规则"), sources: t("证据库"), runs: t("运行记录") };
-  const title = `<div class="page-title"><div>
+  const title = `<div class="page-title ${tab === "summary" ? "summary-page-title" : ""}"><div>
     <div class="row">${pill(t(scenarios[task.plan.scenario] || "自定义"))}${task.demo ? pill(t("合成演示"), "a") : ""}
     ${pill(task.active ? t("监测中") : t("已暂停"), task.active ? "g" : "")}</div>
-    <h1 class="task-title">${escape(task.plan.title)}</h1><p>${escape(task.plan.goal)}</p>
+    <h1 class="task-title">${escape(task.plan.title)}</h1>${tab !== "summary" ? `<p>${escape(task.plan.goal)}</p>` : ""}
     </div><div class="row task-actions">
       ${button(task.active ? t("暂停") : t("启用方案"), "toggle-active", !task.active)}
       ${button(t("试跑规则"), "trial")}
@@ -642,9 +649,9 @@ function renderTask(task, route, { evidence, editedRules, insights }) {
 }
 
 function summaryTab(task, insights) {
-  const last = task.runs[0];
   const latestCheck = insights.checks.at(-1);
   const events = task.events.map(event => ({ ...event, task }));
+  const configured = task.plan.feeds.length || task.plan.news_query;
   return `<div class="overview-metrics" aria-label="${t("监测指标")}">
     ${metric("inbox", t("累计证据"), insights.evidence_count)}
     ${metric("signal", t("待处理事件"), events.filter(event => event.status !== "resolved").length)}
@@ -652,14 +659,17 @@ function summaryTab(task, insights) {
   </div>
   <div class="overview-grid"><div class="overview-data">
     ${checkChart(insights.checks)}
-    ${sourceChart(task, insights)}
-    ${section(t("已归档的事件"), events.length ? events.map(eventRow).join("") : empty(
-      t("试跑可以预览触发结果。启用方案并正式检查后，符合规则的主题会在这里形成事件。"),
-      `<a class="button" href="${hrefFor(task.id, "sources")}">${t("查看或导入证据")}</a>`))}
-    ${last ? section(t("最近运行"), runCard(last, false),
-      `<a href="${hrefFor(task.id, "runs", last.id)}">${t("查看运行记录")}</a>`) : ""}
+    ${insights.evidence_count ? sourceChart(task, insights) : `<section class="card overview-source-setup">
+      <span class="scene-icon">${icon("news")}</span><div><h2>${t("来源分布")}</h2>
+      <p class="meta">${configured ? t("待采集证据") : t("尚未选择信源")}</p></div>
+      <a class="button" href="${hrefFor(task.id, configured ? "sources" : "rules")}">${configured ? t("证据库") : t("配置来源")}</a>
+    </section>`}
+    ${events.length ? section(t("已归档的事件"), events.map(eventRow).join("")) : ""}
+    ${task.runs.length ? `<a class="overview-run-link" href="${hrefFor(task.id, "runs")}">${icon("clock")}${t("查看运行记录")}${icon("diagonal")}</a>` : ""}
     </div><aside class="overview-side">${memoryPanel(task)}
-    <div class="card event-panel rules-panel"><div class="row rules-panel-title"><span class="scene-icon">${icon("signal")}</span><h3>${t("当前规则")}</h3></div>
+    <details class="card event-panel rules-panel overview-rules"><summary class="row rules-panel-title">
+      <span class="scene-icon">${icon("signal")}</span><strong>${t("当前规则")}</strong>
+      <span class="meta">${t("每 {minutes} 分钟", {minutes: task.plan.cadence})}</span>${icon("chevron")}</summary>
       <p class="meta">${t("方案第 {revision} 版", {revision: task.revision})} · ${task.plan.generatedBy === "model" ? t("模型起草") : t("本地规则起草")}</p>
       <dl class="rule-facts">
         <div><dt>${t("观察窗口")}</dt><dd>${t("{hours} 小时", task.plan)}</dd></div>
@@ -669,7 +679,7 @@ function summaryTab(task, insights) {
       </dl>
       <div class="row rule-links"><a href="${hrefFor(task.id, "rules")}">${t("修改规则")}</a>
         <a href="${apiTask(task.id)}/report?lang=${language()}" download>${t("导出情报简报")}</a></div>
-    </div></aside></div>`;
+    </details></aside></div>`;
 }
 
 function metric(symbol, label, value, extra = "") {
@@ -682,7 +692,14 @@ function metric(symbol, label, value, extra = "") {
 function checkChart(checks) {
   const title = t("检查趋势");
   const header = `<div class="chart-title"><h2>${title}</h2><p class="meta">${t("最近正式检查的输入记录数")}</p></div>`;
-  if (!checks.length) return `<section class="card insight-chart">${header}<p class="chart-empty">${t("完成首次正式检查后，这里会显示记录数。")}</p></section>`;
+  if (!checks.some(check => check.count)) {
+    return `<section class="card insight-chart empty-trend">
+      <div class="row spread"><h2>${title}</h2><span class="meta">${checks.length
+        ? t("{count} 次检查", {count: checks.length}) : t("尚无检查")}</span></div>
+      ${checks.length ? `<div class="zero-checks" aria-hidden="true">${checks.map(() => "<i></i>").join("")}</div>` : ""}
+      <p class="meta">${checks.length ? t("这些检查均未采集到记录。") : t("等待首次正式检查。")}</p>
+    </section>`;
+  }
   const max = Math.max(1, ...checks.map(check => check.count));
   const baseline = 110;
   const yFor = count => baseline - (count / max) * 94;
@@ -722,25 +739,18 @@ function sourceChart(task, { sources, evidence_count: total }) {
 function memoryPanel(task) {
   const notes = state.memories;
   const rows = notes.map(note => `<li class="memory-note">
-    <time class="meta" datetime="${escape(note.updated_at)}">${stamp(note.updated_at)}</time>
-    <p>${escape(note.text)}</p>
+    <details><summary>${escape(note.text.split("\n")[0])}</summary>
+    <time class="meta" datetime="${escape(note.updated_at)}">${stamp(note.updated_at)}</time><p>${escape(note.text)}</p>
     <div class="row memory-actions">
       ${button(t("用这条记忆起草"), "memory-draft", false, `data-note="${escape(note.id)}"`)}
       ${button(t("编辑"), "memory-edit", false, `data-note="${escape(note.id)}"`)}
       ${button(t("删除"), "memory-remove", false, `data-note="${escape(note.id)}"`)}
-    </div>
+    </div></details>
   </li>`);
   return `<section class="card memory-panel">
     <div class="row memory-panel-title"><span class="scene-icon">${icon("memory")}</span><h2>${t("Agent 记忆")}</h2>
-      ${notes.length ? pill(t("{count} 条记忆", {count: notes.length})) : ""}</div>
-    <p class="meta">${t("检索相关主题和检查本任务时，Agent 会优先呈现命中这些记忆的内容。")}</p>
-    <form data-form="memory-add">
-      <label class="sr-only" for="task-memory">${t("记下一个想法")}</label>
-      <textarea id="task-memory" name="text" required maxlength="2000" rows="3"
-        placeholder="${t("例如，关注：安全车、车手变动")}">${escape(state.memoryDrafts.get(task.id))}</textarea>
-      ${formError}<div class="form-actions"><button type="submit" class="button primary">${t("记下来")}</button></div>
-    </form>
-    ${rows.length ? `<ul class="memory-notes">${rows.slice(0, 3).join("")}</ul>` : ""}
+      ${button(icon("plus") + t("记想法"), "memory-new")}</div>
+    ${rows.length ? `<ul class="memory-notes">${rows.slice(0, 3).join("")}</ul>` : `<p class="meta">${t("还没有记忆")}</p>`}
     ${rows.length > 3 ? `<details><summary>${t("查看其余 {count} 条记忆", {count: rows.length - 3})}</summary>
       <ul class="memory-notes">${rows.slice(3).join("")}</ul></details>` : ""}
     ${task.intent ? `<details class="memory-original"><summary>${t("原始需求")}</summary><p>${escape(task.intent)}</p></details>` : ""}
@@ -992,6 +1002,27 @@ async function openMemoryAction(element) {
   }
 }
 
+async function openDeliverySettings() {
+  try {
+    const settings = await api("/api/delivery");
+    if (parseRoute().name !== "inbox") return;
+    viewDialog(t("提醒与简报"), `<form class="delivery-form" data-form="delivery">
+      <label class="checkbox"><input type="checkbox" name="alerts"
+        ${settings.alerts ? "checked" : ""} ${settings.desktop_available ? "" : "disabled"}>${t("重要变化桌面提醒")}</label>
+      <label class="checkbox"><input type="checkbox" name="daily" ${settings.daily ? "checked" : ""}>${t("每日自动生成简报")}</label>
+      ${input("time", t("简报时间（北京时间）"), settings.time, 'type="time" required')}
+      <p class="help">${t("后台服务运行时可发送提醒和生成简报。")}</p>
+      ${settings.desktop_available ? "" : `<p class="help">${t("桌面提醒当前支持 macOS。")}</p>`}
+      ${settings.last_error ? `<p class="notice warn">${t("上次桌面提醒发送失败，系统将重试。")}</p>` : ""}
+      ${formError}<p class="meta delivery-status" role="status"></p>
+      <div class="form-actions">${settings.desktop_available ? button(t("发送测试提醒"), "delivery-test") : ""}
+        <button type="submit" class="button primary">${t("保存")}</button></div>
+    </form>`);
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
 function readRecords(content) {
   const text = content.replace(/^\uFEFF/, "").trim();
   if (!text) throw new Error(t("请选择文件或粘贴记录"));
@@ -1059,6 +1090,11 @@ async function submitForm(form) {
     if (dialog.contains(form)) dialog.close();
     await refresh();
     toast(t("规则已保存。"));
+  } else if (action === "delivery") {
+    await api("/api/delivery", {alerts: data.get("alerts") === "on", daily: data.get("daily") === "on", time: data.get("time")});
+    dialog.close();
+    await refresh();
+    toast(t("提醒设置已保存。"));
   } else if (["memory-add", "memory-edit", "memory-remove"].includes(action)) {
     const path = apiTask(task.id) + "/memory";
     const text = data.get("text");
@@ -1069,8 +1105,8 @@ async function submitForm(form) {
       const notePath = path + "/" + encodeURIComponent(form.dataset.note);
       if (action === "memory-edit") await api(notePath, { text });
       else await api(notePath + "/remove", {});
-      dialog.close();
     }
+    if (dialog.contains(form)) dialog.close();
     if (parseRoute().id === task.id) await refresh();
     toast(action === "memory-remove" ? t("记忆已删除。") : t("记忆已保存。"));
   } else if (action === "run") {
@@ -1240,10 +1276,29 @@ document.addEventListener("click", async event => {
   }
   if (action === "trial" || action === "live") openRun(action);
   if (action === "import") openImport();
+  if (action === "memory-new") {
+    viewDialog(t("记下一个想法"), `<form data-form="memory-add">
+      ${textArea("text", t("记忆内容"), state.memoryDrafts.get(state.task.id) || "",
+        `id="task-memory" required maxlength="2000" placeholder="${t("例如，关注：安全车、车手变动")}"`)}
+      ${formError}<div class="form-actions"><button type="submit" class="button primary">${t("记下来")}</button></div></form>`);
+  }
   if (action === "refresh-inbox") {
     element.disabled = true;
     await refresh();
     return;
+  }
+  if (action === "delivery-settings") await openDeliverySettings();
+  if (action === "delivery-test") {
+    const status = form.querySelector(".delivery-status");
+    element.disabled = true;
+    try {
+      await api("/api/delivery/test", {});
+      status.textContent = t("测试提醒已提交到系统通知。");
+    } catch (error) {
+      status.textContent = error.message;
+    } finally {
+      element.disabled = false;
+    }
   }
   if (["memory-draft", "memory-edit", "memory-remove"].includes(action)) await openMemoryAction(element);
   if (action === "event-status") {

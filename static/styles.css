@@ -431,11 +431,22 @@ summary.search-progress-head:focus-visible { outline-offset: -3px; }
 .overview-metric .metric-time { font-size: 1.02rem; overflow-wrap: anywhere; }
 .overview-grid { display: grid; grid-template-columns: minmax(0, 1.62fr) minmax(245px, 1fr); align-items: start; gap: 16px; }
 .overview-data, .overview-side { min-width: 0; }
+.summary-page-title { margin-bottom: 18px; }
+.overview-source-setup { display: flex; align-items: center; gap: 10px; }
+.overview-source-setup h2 { font-size: 1rem; }
+.overview-source-setup .button { margin-left: auto; min-height: 36px; padding: 4px 9px; }
+.overview-run-link { display: inline-flex; align-items: center; gap: 7px; padding: 10px 2px; font-size: .84rem; }
+.overview-run-link .ui-icon { width: 15px; height: 15px; }
 .overview-data > .insight-chart + .section-block { margin-top: 20px; }
 .overview-side .card + .card, .overview-data .insight-chart + .insight-chart { margin-top: 14px; }
 .insight-chart { padding: 16px; }
 .chart-title p, .insight-chart > .meta { margin-top: 3px; }
 .chart-title a { font-size: .82rem; font-weight: 650; }
+.empty-trend > .meta { margin-top: 9px; }
+.zero-checks { display: flex; justify-content: space-between; align-items: center; position: relative; margin-top: 15px; padding: 0 4px; }
+.zero-checks::before { position: absolute; content: ""; inset: 50% 4px auto; border-top: 1px solid #cfc5ef; }
+.zero-checks i { position: relative; display: block; width: 9px; height: 9px; background: #f8f4ff; border: 1px solid #9d8ed8; border-radius: 50%; }
+.zero-checks i:last-child { background: #7866ca; border-color: #7866ca; }
 .chart-empty {
   margin-top: 12px; padding: 14px 12px; border: 1px dashed #ddd9ef; border-radius: 9px;
   color: var(--muted); background: #fbfaff; font-size: .83rem;
@@ -461,11 +472,16 @@ summary.search-progress-head:focus-visible { outline-offset: -3px; }
 .memory-panel-title { align-items: center; }
 .memory-panel-title h2 { font-size: 1.08rem; }
 .memory-panel-title .scene-icon { width: 32px; height: 32px; }
+.memory-panel-title .button { margin-left: auto; min-height: 31px; padding: 3px 8px; font-size: .75rem; }
+.memory-panel-title .button .ui-icon { width: 15px; height: 15px; }
 .memory-panel > .meta { margin: 7px 0 11px; }
 .memory-panel textarea { background: #fff; font-size: .85rem; }
 .memory-panel .form-actions { margin-top: 7px; }
 .memory-panel .form-actions .button { min-height: 35px; }
 .memory-note { padding: 10px 0; border-top: 1px solid #eae5f3; }
+.memory-note details { margin: 0; }
+.memory-note summary { overflow-wrap: anywhere; }
+.memory-note time { display: block; margin-top: 6px; }
 .memory-note p, .memory-original p, .memory-quote {
   white-space: pre-wrap; overflow-wrap: anywhere; font-size: .86rem; margin-top: 3px;
 }
@@ -473,6 +489,15 @@ summary.search-progress-head:focus-visible { outline-offset: -3px; }
 .memory-actions .button { min-height: 30px; padding: 3px 7px; font-size: .75rem; }
 .memory-actions .button:first-child { color: var(--strong-accent); border-color: #dfd8f8; background: #f6f3ff; }
 .memory-original { border-top: 1px solid var(--line); padding-top: 9px; }
+.overview-rules > summary { list-style: none; }
+.overview-rules > summary::-webkit-details-marker { display: none; }
+.overview-rules > summary .meta { margin-left: auto; font-weight: 500; font-size: .75rem; }
+.overview-rules > summary > .ui-icon { width: 15px; height: 15px; }
+.overview-rules[open] > summary > .ui-icon { transform: rotate(180deg); }
+.delivery-form { display: grid; gap: 13px; }
+.delivery-form .field { max-width: 200px; }
+.delivery-form .form-actions { margin-top: 2px; }
+.delivery-status:empty { display: none; }
 .memory-context {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 10px; margin: 8px 0 12px;
   padding: 7px 10px; background: #f4efff; border: 1px solid #e7ddfa; border-radius: 8px;
@@ -642,6 +667,7 @@ summary { cursor: pointer; color: var(--accent); font-size: .88rem; font-weight:
   .radar-floor { inset-inline: -95%; }
 }
 @media (max-width: 510px) {
+  .overview-source-setup { flex-wrap: wrap; }
   .inbox-story-heading, .inbox-story-body { padding-inline: 13px; }
   .inbox-reports li { align-items: flex-start; flex-direction: column; }
   .overview-metrics { gap: 7px; }

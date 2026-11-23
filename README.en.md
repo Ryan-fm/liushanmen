@@ -20,6 +20,7 @@ Open the [local workspace](http://127.0.0.1:8765/) and try “Track the latest F
 
 - **Live search** queries Google News and Bing News in parallel and matches topics such as F1, NBA, and soccer to dedicated feeds.
 - **Daily intelligence inbox** groups similar coverage, highlights today's developments, and shows source failures and recoveries.
+- **Alerts and briefings** provide macOS desktop notifications and local Markdown briefings. Configure them in the inbox and keep the local service running.
 - **Custom monitoring** lets you set keywords, thresholds, and check intervals. Review the preview and confirm to start scheduled checks.
 - **Task charts and memory** show trends and sources, prioritize matching news and evidence, and draft rule changes for review.
 - **Event review** supports CSV / JSON imports, trial runs, evidence review, and Markdown briefings.

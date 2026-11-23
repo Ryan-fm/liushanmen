@@ -12,6 +12,7 @@ from threading import Event, Thread
 from urllib.parse import parse_qs, urlsplit
 
 from intel.demo import seed
+from intel.delivery import Delivery
 from intel.engine import Engine
 from intel.i18n import copy, error_text, locale
 from intel.inbox import build_inbox
@@ -80,6 +81,7 @@ class Application:
         self.engine = engine
         self.feeds = configured_feeds
         self.news = NewsDiscovery(database, configured_feeds)
+        self.delivery = Delivery(database, configured_feeds)
 
     def discover(self, body, *, on_progress=None, lang="zh-CN"):
         intent = string(body.get("intent"), "监测需求", 1000, True)
@@ -94,6 +96,13 @@ class Application:
         db = self.database
         if method == "GET" and path == ["inbox"]:
             return build_inbox(db, self.feeds, lang)
+        if path == ["delivery"]:
+            if method == "GET":
+                return self.delivery.status()
+            if method == "POST":
+                return self.delivery.save_settings(body, lang)
+        if method == "POST" and path == ["delivery", "test"]:
+            return self.delivery.test(lang)
         if method == "GET" and path == ["meta"]:
             return {"feeds": [{"id": key, "name": value["name"], "group": value.get("group", "custom")}
                               for key, value in self.feeds.items()],
@@ -266,6 +275,12 @@ def handler_for(app):
                     self.json(404, {"error": error_text("找不到页面", lang)})
                     return
                 parts = path.removeprefix("/api/").strip("/").split("/")
+                if method == "GET" and parts == ["briefings", "latest"]:
+                    briefing = app.database.latest_briefing()
+                    if briefing:
+                        self.respond(200, briefing["markdown"].encode(), "text/markdown; charset=utf-8",
+                                     {"Content-Disposition": f'attachment; filename="briefing-{briefing["day"]}.md"'})
+                        return
                 if method == "GET" and len(parts) == 3 and parts[0] == "tasks" and parts[2] == "report":
                     report_lang = locale(parse_qs(url.query).get("lang", [lang])[0])
                     report = write_report(app.database.detail(parts[1]), report_lang)
@@ -330,6 +345,14 @@ def run_pending(app, stop):
             list(executor.map(run_one, due))
 
 
+def run_delivery(app, stop):
+    while not stop.wait(9):
+        try:
+            app.delivery.tick()
+        except Exception:
+            LOGGER.exception("Background delivery failed")
+
+
 def main():
     parser = argparse.ArgumentParser(description="六扇门本地情报工作台")
     parser.add_argument("--port", default=8765, type=int)
@@ -348,6 +371,7 @@ def main():
     with ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(application)) as server:
         worker = Thread(target=run_pending, args=(application, stop), daemon=True)
         worker.start()
+        Thread(target=run_delivery, args=(application, stop), daemon=True).start()
         print(f"六扇门  http://127.0.0.1:{server.server_port}", flush=True)
         try:
             server.serve_forever()

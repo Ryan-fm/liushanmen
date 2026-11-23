@@ -1,6 +1,7 @@
 """SQLite storage for plans, source records, versioned events and run results."""
 from collections import Counter
 from contextlib import contextmanager
+from datetime import timedelta
 from functools import partial
 import json
 import sqlite3
@@ -9,6 +10,8 @@ from uuid import uuid4
 from .i18n import copy
 from .rules import InputError
 from .sources import date, iso, now
+
+DEFAULT_DELIVERY = {"alerts": False, "daily": False, "time": "20:00", "locale": "zh-CN"}
 
 
 def pack(value):
@@ -48,6 +51,14 @@ class Database:
                     UNIQUE (task_id, topic)
                 );
                 CREATE TABLE IF NOT EXISTS meta (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS notification_outbox (
+                    id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,
+                    created_at TEXT NOT NULL, next_at TEXT NOT NULL, sent_at TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT
+                );
+                CREATE TABLE IF NOT EXISTS daily_briefings (
+                    day TEXT PRIMARY KEY, created_at TEXT NOT NULL, markdown TEXT NOT NULL
+                );
             """)
 
     @contextmanager
@@ -274,6 +285,62 @@ class Database:
             connection.execute("UPDATE events SET status=?,updated_at=?,history=? WHERE id=?",
                                (status, stamp, pack(history[-60:]), event_id))
 
+    @staticmethod
+    def _delivery_settings(connection):
+        row = connection.execute("SELECT value FROM meta WHERE name='delivery'").fetchone()
+        return {**DEFAULT_DELIVERY, **(json.loads(row["value"]) if row else {})}
+
+    def delivery_settings(self):
+        with self.connect() as connection:
+            return self._delivery_settings(connection)
+
+    def save_delivery_settings(self, settings):
+        with self.connect() as connection:
+            connection.execute("INSERT OR REPLACE INTO meta VALUES('delivery',?)", (pack(settings),))
+            for setting, kind in (("alerts", "change"), ("daily", "briefing")):
+                if not settings[setting]:
+                    connection.execute("DELETE FROM notification_outbox WHERE kind=? AND sent_at IS NULL", (kind,))
+
+    @staticmethod
+    def _queue_delivery(connection, key, kind, title, body, stamp):
+        connection.execute("INSERT OR IGNORE INTO notification_outbox(id,kind,title,body,created_at,next_at) VALUES(?,?,?,?,?,?)",
+                           (key, kind, title, body, stamp, stamp))
+
+    def pending_delivery(self, stamp):
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM notification_outbox WHERE sent_at IS NULL AND next_at<=? ORDER BY created_at LIMIT 6", (stamp,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def finish_delivery(self, item, at, error=None):
+        with self.connect() as connection:
+            if error is None:
+                connection.execute("UPDATE notification_outbox SET sent_at=?,last_error=NULL WHERE id=?", (iso(at), item["id"]))
+            else:
+                delay = min(60, 2 ** min(item["attempts"] + 1, 6))
+                connection.execute("UPDATE notification_outbox SET attempts=attempts+1,next_at=?,last_error=? WHERE id=?",
+                                   (iso(at + timedelta(minutes=delay)), error, item["id"]))
+
+    def latest_briefing(self):
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM daily_briefings ORDER BY day DESC LIMIT 1").fetchone()
+        return dict(row) if row else None
+
+    def save_briefing(self, day, stamp, markdown, title, body, *, announce):
+        with self.connect() as connection:
+            cursor = connection.execute("INSERT OR IGNORE INTO daily_briefings VALUES(?,?,?)", (day, stamp, markdown))
+            if cursor.rowcount and announce and self._delivery_settings(connection)["daily"]:
+                self._queue_delivery(connection, "briefing:" + day, "briefing", title, body, stamp)
+
+    def last_delivery_error(self):
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT last_error FROM notification_outbox WHERE sent_at IS NULL AND last_error IS NOT NULL "
+                "ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+        return row["last_error"] if row else None
+
     def save_run(self, task, mode, stamp, result, candidates, next_at=None):
         run_id = uuid4().hex[:12]
         with self.connect() as connection:
@@ -284,7 +351,17 @@ class Database:
             if mode == "live" and not current["active"]:
                 raise InputError("任务已暂停，本次未更新事件")
             if mode == "live":
-                self.update_events(connection, task, stamp, candidates, set(result["complete"]))
+                changes = self.update_events(connection, task, stamp, candidates, set(result["complete"]))
+                if changes and not task["demo"]:
+                    settings = self._delivery_settings(connection)
+                    if settings["alerts"]:
+                        lang = settings["locale"]
+                        labels = copy(lang, "、", ", ").join(changes[:3])
+                        text = copy(lang, f"{len(changes)} 个事件有重要变化 · {labels}",
+                                    f"Important changes in {len(changes)} events · {labels}")
+                        self._queue_delivery(connection, "change:" + run_id, "change",
+                                             copy(lang, "六扇门 · 重要变化", "Liushanmen · Important update"),
+                                             f"{task['plan']['title']}\n{text}", stamp)
                 connection.execute("UPDATE tasks SET next_at=? WHERE id=?", (next_at, task["id"]))
             connection.execute("INSERT INTO runs VALUES(?,?,?,?,?)",
                                (run_id, task["id"], mode, stamp, pack(result)))
@@ -292,6 +369,7 @@ class Database:
 
     def update_events(self, connection, task, stamp, candidates, complete):
         text = partial(copy, task["plan"].get("locale"))
+        changes = []
         prior = {
             row["topic"]: row for row in connection.execute("SELECT * FROM events WHERE task_id=?", (task["id"],))
         }
@@ -306,6 +384,7 @@ class Database:
                 history = [{"at": stamp, "type": "new", "text": text("达到触发条件，开始核查。", "The rule triggered. Review is pending.")}]
                 connection.execute("INSERT INTO events VALUES(?,?,?,?,?,?,?)",
                                    (uuid4().hex[:12], task["id"], label, "open", stamp, pack(data), pack(history)))
+                changes.append(label)
                 continue
             if label not in complete:
                 continue
@@ -336,3 +415,6 @@ class Database:
                         "evidence_archived": True}
             connection.execute("UPDATE events SET status=?,updated_at=?,data=?,history=? WHERE id=?",
                                (status, stamp, pack(data), pack(history[-60:]), row["id"]))
+            if stage == "alert" and (new_ids or old.get("stage") != "alert"):
+                changes.append(label)
+        return changes

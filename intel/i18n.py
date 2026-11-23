@@ -13,6 +13,9 @@ def copy(lang, chinese, english):
 
 
 ERRORS = {
+    "请检查提醒开关与简报时间。": "Check the notification options and briefing time.",
+    "当前设备无法发送桌面提醒。": "Desktop notifications are unavailable on this device.",
+    "桌面提醒发送失败。": "The desktop notification could not be sent.",
     "公开新闻搜索渠道不正确。": "Unknown public news provider.",
     "请至少选择一个公开新闻搜索渠道。": "Select at least one public news provider.",
     "请补充关注对象或希望解决的问题": "Describe what you want to track or the problem you want to investigate.",
