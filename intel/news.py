@@ -5,10 +5,12 @@ from threading import Lock
 from uuid import uuid4
 
 from .i18n import copy
+from .memory import focus_from_memory, phrase_pattern, rank_by_memory, searchable_text
 from .rules import MINIMUM, OWNER, TIME_WINDOW, InputError, validate
 from .sources import collect_sources, configured_sources, date, iso, normalize_text, now
 
-F1 = re.compile(r"(?<!\w)f\s*1(?![a-z0-9])|formula\s*(?:one|1)|一级方程式", re.I)
+F1 = re.compile(r"(?<![a-z0-9])(?:f\s*1|formula\s*(?:one|1))(?![a-z0-9])|一级方程式", re.I)
+F1_ALIASES = ("F1", "Formula 1", "Formula One", "一级方程式")
 NEWS = re.compile(r"新闻|资讯|报道|赛况|头条|公开动态|比赛结果|赛果")
 NEWS_EN = re.compile(r"\b(?:news|headlines|press coverage|race reports?|race results?|public updates)\b", re.I)
 PRIVATE = re.compile(r"私域|内部|工单|客服|售后|退款|手机号|@|https?://|"
@@ -43,6 +45,26 @@ def subject_from(intent):
     return subject, subject, ()
 
 
+def task_matches_subject(task, label):
+    plan = task["plan"]
+    aliases = F1_ALIASES if label == "F1" else (label,)
+    keys = {normalize_text(alias) for alias in aliases}
+    targets = [*plan.get("entities", []), plan.get("news_query", "")]
+    targets = [target for target in targets if target]
+    if targets:
+        return any(normalize_text(target) in keys for target in targets)
+    for value in (task["intent"], plan["goal"], plan["title"]):
+        inferred = subject_from(value)
+        if inferred:
+            if normalize_text(inferred[0]) in keys:
+                return True
+        else:
+            text = searchable_text(value)
+            if any(phrase_pattern(alias).search(text) for alias in aliases):
+                return True
+    return False
+
+
 def preview_items(records, hours, captured_at):
     lower = captured_at - timedelta(hours=hours)
     candidates = [
@@ -63,7 +85,7 @@ def preview_items(records, hours, captured_at):
     return items
 
 
-def highlight(items, limit=8):
+def highlight_by_source(items, limit):
     selected = []
     seen = set()
     for item in items:
@@ -75,6 +97,16 @@ def highlight(items, limit=8):
     ids = {item["id"] for item in selected}
     selected.extend(item for item in items if item["id"] not in ids)
     return selected[:limit]
+
+
+def highlight(items, limit=8):
+    preferred = [item for item in items if item.get("memory_hits")]
+    selected = highlight_by_source(preferred, limit)
+    if len(selected) < limit:
+        selected.extend(highlight_by_source(
+            [item for item in items if not item.get("memory_hits")], limit - len(selected)
+        ))
+    return selected
 
 
 class NewsDiscovery:
@@ -90,16 +122,20 @@ class NewsDiscovery:
         hours = draft["hours"] if TIME_WINDOW.search(intent) else 168
         keys = [key for key in direct if key in self.catalog]
         query = "" if keys else search_term
+        notes = (note for task in self.database.tasks_with_memories()
+                 if task_matches_subject(task, label) for note in task["notes"])
+        focus = focus_from_memory(notes, lang)
 
         def source_result(entry, batch):
             found = preview_items(batch, hours, now())
-            samples = [{field: item[field] for field in ("title", "url", "source")} for item in found[:2]]
+            samples = [{"title": item["title"], "url": item["url"], "source": item["source"],
+                        "memory_hits": item.get("memory_hits", [])} for item in rank_by_memory(found, focus)[:2]]
             on_progress("source_result", {**entry, "matched": len(found), "samples": samples})
 
         def search(feed_keys, search_query):
             selected = configured_sources(self.catalog, feed_keys, search_query, hours)
             if on_progress is not None:
-                on_progress("checking_sources", {"hours": hours, "sources": [
+                on_progress("checking_sources", {"hours": hours, "memory_focus": list(focus), "sources": [
                     {"id": key, "source": config["name"]} for key, config in selected.items()
                 ]})
             return collect_sources(selected, on_result=source_result if on_progress is not None else None, lang=lang)
@@ -120,7 +156,7 @@ class NewsDiscovery:
         if on_progress is not None:
             on_progress("summarizing", {})
 
-        aliases = ["F1", "Formula 1", "Formula One", "一级方程式"] if label == "F1" else [label]
+        aliases = list(F1_ALIASES) if label == "F1" else [label]
         explicit_minimum = bool(re.search(r"至少\s*\d+\s*条|\bat least\s+\d+", intent, re.I) and MINIMUM.search(intent))
         title_suffix = copy(lang, " 新闻跟踪", " News Monitoring")
         topic_suffix = copy(lang, " 新闻", " News")
@@ -144,7 +180,7 @@ class NewsDiscovery:
             self._pending[key] = {"intent": intent, "items": items, "expires": nowish + timedelta(minutes=30)}
         return plan, {
             "id": key, "label": label, "checked_at": iso(nowish), "count": len(items),
-            "items": highlight(items), "sources": logs,
+            "items": highlight(rank_by_memory(items, focus)), "sources": logs, "memory_focus": list(focus),
         }
 
     def confirm(self, key, raw_plan):

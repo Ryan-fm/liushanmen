@@ -129,6 +129,19 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def tasks_with_memories(self):
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT t.id,t.plan,t.intent,m.text FROM tasks t JOIN task_memory m ON m.task_id=t.id "
+                "WHERE t.demo=0 ORDER BY m.updated_at DESC,m.rowid DESC"
+            ).fetchall()
+        tasks = {}
+        for row in rows:
+            if row["id"] not in tasks:
+                tasks[row["id"]] = {"plan": json.loads(row["plan"]), "intent": row["intent"], "notes": []}
+            tasks[row["id"]]["notes"].append({"text": row["text"]})
+        return tasks.values()
+
     def memory(self, key, note_id):
         with self.connect() as connection:
             row = connection.execute(

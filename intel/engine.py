@@ -7,8 +7,17 @@ from hashlib import sha256
 from threading import Lock
 
 from .i18n import copy
+from .memory import focus_from_memory, rank_by_memory
 from .rules import InputError, model_json
 from .sources import collect_sources, configured_sources, date, iso, normalize_text, now
+
+
+def record_text(record):
+    return " ".join((record["entity"], record["title"], record["text"])).casefold()
+
+
+def matches_entities(text, entities):
+    return not entities or any(term.casefold() in text for term in entities)
 
 
 class Engine:
@@ -42,6 +51,7 @@ class Engine:
         end = date(at) if mode == "trial" and at else now()
         if end > now() + timedelta(minutes=2):
             raise InputError("试跑结束时间不能在未来")
+        focus = focus_from_memory(self.database.memories(key), lang)
         begin = end - timedelta(hours=plan["hours"])
         records = self.database.records(key)
         # Historical runs replay saved records by their publication timestamps.
@@ -77,7 +87,7 @@ class Engine:
         for topic in plan["topics"]:
             label = topic["label"]
             hits = [hit for _, _, stage in stage_results for hit in stage[label]]
-            candidate = self.combine(topic, hits, plan, source_log)
+            candidate = self.combine(topic, hits, plan, source_log, focus=focus)
             if candidate["count"]:
                 candidate["followup"] = self.follow_up(candidate, topic, plan, observed, earlier)
             candidates.append(candidate)
@@ -108,6 +118,13 @@ class Engine:
             ],
             "reasoning": reasoning, "complete": complete,
         }
+        if focus:
+            relevant = [record for record in observed if matches_entities(record_text(record), plan["entities"])]
+            matches = [record for record in rank_by_memory(relevant, focus) if record.get("memory_hits")]
+            result["memory_review"] = {
+                "focus": list(focus), "count": len(matches),
+                "items": [{**record, "text": record["text"][:800]} for record in matches[:3]],
+            }
         stamp = now()
         run_id = self.database.save_run(task, mode, iso(stamp), result, candidates,
                                         iso(stamp + timedelta(minutes=plan["cadence"])))
@@ -151,8 +168,8 @@ class Engine:
         for item in observed:
             if item["kind"] != kind:
                 continue
-            searchable = " ".join((item["entity"], item["title"], item["text"])).casefold()
-            if plan["entities"] and not any(term.casefold() in searchable for term in plan["entities"]):
+            searchable = record_text(item)
+            if not matches_entities(searchable, plan["entities"]):
                 continue
             for topic in plan["topics"]:
                 matched = [term for term in topic["terms"] if term.casefold() in searchable]
@@ -161,7 +178,7 @@ class Engine:
         return result
 
     @staticmethod
-    def combine(topic, hits, plan, source_log):
+    def combine(topic, hits, plan, source_log, *, focus=None):
         hits.sort(key=lambda hit: (bool(hit["reference"]), hit["published_at"], hit["id"]), reverse=True)
         body_seen = set()
         reference_seen = set()
@@ -204,18 +221,22 @@ class Engine:
                                 " Some feeds failed. Counts cover the available data.")
         grouped = Counter(hit["entity"] for hit in evidence if hit["entity"])
         ordered = sorted(evidence, key=lambda hit: hit["published_at"], reverse=True)
+        ordered = rank_by_memory(ordered, focus)
         # Show at least one representative record from each source before filling the remaining slots.
         representatives = {}
         for hit in ordered:
             representatives.setdefault(hit["source"].casefold(), hit)
         representative_ids = {hit["id"] for hit in representatives.values()}
-        preview = list(representatives.values()) + [hit for hit in ordered if hit["id"] not in representative_ids]
+        preview = (list(representatives.values()) + [hit for hit in ordered if hit["id"] not in representative_ids])[:10]
+        if focus:
+            order = {hit["id"]: index for index, hit in enumerate(ordered)}
+            preview.sort(key=lambda hit: order[hit["id"]] if hit.get("memory_hits") else len(order))
         return {
             "label": topic["label"], "stage": status, "owner": topic["owner"], "action": topic["action"],
             "count": count, "raw_count": len(hits), "sources": sources, "explanation": explanation,
             "window_ids": sorted(hit["item_key"] for hit in evidence),
             "entities": [{"name": name, "count": amount} for name, amount in grouped.most_common(6)],
-            "evidence": [{**hit, "text": hit["text"][:800]} for hit in preview[:10]],
+            "evidence": [{**hit, "text": hit["text"][:800]} for hit in preview],
             "model": None,
         }
 

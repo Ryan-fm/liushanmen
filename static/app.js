@@ -19,7 +19,7 @@ const stages = { alert: ["达到阈值", "r"], watch: ["观察中", "a"], quiet:
 const freshDraft = (intent = "", useModel = false) => ({ intent, useModel, selected: "", error: "" });
 const freshAgent = (intent = "", useModel = false) => ({
   ...freshDraft(intent, useModel), proposal: null, preview: null, viewOnly: false, note: "", loading: false,
-  sources: new Map(), searchHours: 0, summarizing: false, controller: null,
+  sources: new Map(), searchHours: 0, memoryFocus: [], summarizing: false, controller: null,
 });
 const state = { meta: { feeds: [] }, task: null, memories: [], memoryDrafts: new Map(),
   sequence: 0, agent: freshAgent(), homeDraft: freshDraft() };
@@ -336,6 +336,18 @@ function sourceStatus(source, loading) {
   return loading ? t("正在读取") : t("未完成");
 }
 
+function memoryContext(focus) {
+  if (!focus?.length) return "";
+  return `<div class="memory-context">
+    <strong>${icon("memory")}${t("已参考任务记忆")}</strong>
+    <span>${escape(joinTerms(focus))}</span>
+  </div>`;
+}
+
+function memoryMatch(item) {
+  return item.memory_hits?.length ? pill(t("记忆命中") + " · " + joinTerms(item.memory_hits), "memory-hit") : "";
+}
+
 function renderSource(source, loading) {
   const status = sourceStatus(source, loading);
   return `<li class="search-source" id="lookup-${escape(source.id)}">
@@ -349,7 +361,7 @@ function renderSource(source, loading) {
     ${source.samples?.length ? `<ul class="source-samples" aria-label="${t("标题样例")}">${source.samples.map(item => {
       const link = safeURL(item.url);
       return `<li>${link ? `<a href="${escape(link)}" target="_blank" rel="noopener noreferrer">${escape(item.title)}${icon("diagonal")}</a>`
-        : escape(item.title)}${item.source !== source.source ? ` <span class="sample-publisher">· ${escape(sourceName(item.source))}</span>` : ""}</li>`;
+        : escape(item.title)}${item.source !== source.source ? ` <span class="sample-publisher">· ${escape(sourceName(item.source))}</span>` : ""} ${memoryMatch(item)}</li>`;
     }).join("")}</ul>` : ""}
   </li>`;
 }
@@ -372,13 +384,15 @@ function renderSearchProgress(agent) {
   const list = `<ul class="search-sources" aria-label="${t("查询来源")}">${[...agent.sources.values()]
     .map(source => renderSource(source, agent.loading)).join("")}</ul>`;
   return agent.loading
-    ? `<section class="search-progress" aria-label="${t("新闻检索进度")}"><div class="search-progress-head">${header}</div>${list}</section>`
+    ? `<section class="search-progress" aria-label="${t("新闻检索进度")}"><div class="search-progress-head">${header}</div>
+        ${memoryContext(agent.memoryFocus)}${list}</section>`
     : `<details class="search-progress" ${agent.error ? "open" : ""}><summary class="search-progress-head">${header}${icon("chevron")}</summary>${list}</details>`;
 }
 
 function updateSearchProgress(agent, type, data) {
   if (type === "checking_sources") {
     agent.searchHours = data.hours;
+    agent.memoryFocus = data.memory_focus || [];
     for (const source of data.sources) agent.sources.set(source.id, { ...source, status: "checking" });
   } else if (type === "source_result") {
     agent.sources.set(data.id, data);
@@ -415,7 +429,7 @@ function renderNews(agent) {
     return `<li class="news-item">
       <div class="row news-meta"><span class="news-publisher">${escape(sourceName(item.source))}</span><time class="meta" datetime="${escape(item.published_at)}">
         ${item.published_missing ? t("首次发现") + " " : ""}${stamp(item.published_at)}
-      </time></div>
+      </time>${memoryMatch(item)}</div>
       <h2>${link ? `<a href="${escape(link)}" target="_blank" rel="noopener noreferrer">${escape(item.title)}${icon("diagonal")}</a>` : escape(item.title)}</h2>
       ${item.summary ? `<p>${escape(item.summary)}</p>` : ""}
       ${item.via_news_search ? `<span class="meta">${t("通过 Google 新闻查看")}</span>` : ""}
@@ -431,6 +445,7 @@ function renderNews(agent) {
   return `<div class="news-heading"><h1 tabindex="-1" class="reply-title">${escape(t("{subject} 新闻", {subject: preview.label}))}</h1>
     <div class="row news-sources">${sources}<span class="news-time meta">${icon("clock")} ${t("查询时间")} ${stamp(preview.checked_at)}</span></div>
     <p class="reply-copy">${summary}</p></div>
+    ${memoryContext(preview.memory_focus)}
     ${items.length ? `<ul class="card news-list" aria-label="${t("新闻预览")}">${items.slice(0, 4).join("")}</ul>` : ""}
     ${items.length > 4 ? `<details class="news-extra"><summary>${t("查看另外 {count} 条", {count: items.length - 4})}</summary>
       <ul class="card news-list" aria-label="${t("更多新闻")}">${items.slice(4).join("")}</ul></details>` : ""}
@@ -634,7 +649,7 @@ function memoryPanel(task) {
   return `<section class="card memory-panel">
     <div class="row memory-panel-title"><span class="scene-icon">${icon("memory")}</span><h2>${t("Agent 记忆")}</h2>
       ${notes.length ? pill(t("{count} 条记忆", {count: notes.length})) : ""}</div>
-    <p class="meta">${t("把想法和后续关注点留在这个任务里。")}</p>
+    <p class="meta">${t("检索相关主题和检查本任务时，Agent 会优先呈现命中这些记忆的内容。")}</p>
     <form data-form="memory-add">
       <label class="sr-only" for="task-memory">${t("记下一个想法")}</label>
       <textarea id="task-memory" name="text" required maxlength="2000" rows="3"
@@ -653,7 +668,7 @@ function evidenceBlock(item, detailButton = true) {
   return `<div class="source">
     <div class="row">${pill(sourceName(item.source), "g")}${pill(t(kinds[item.kind] || "记录"))}
       <time class="meta" datetime="${escape(item.published_at)}">${item.published_missing ? t("首次发现") + " " : ""}${stamp(item.published_at)}</time>
-      ${item.synthetic ? pill(t("演示"), "a") : ""}</div>
+      ${item.synthetic ? pill(t("演示"), "a") : ""}${memoryMatch(item)}</div>
     ${item.title ? `<p><strong>${escape(item.title)}</strong></p>` : ""}
     <p>${escape(item.text)}</p>
     <div class="row meta">${item.entity ? `<span>${escape(item.entity)}</span>` : ""}
@@ -722,12 +737,18 @@ function runsTab(task, selected) {
 
 function runCard(run, expanded) {
   const result = run.result;
+  const review = result.memory_review;
   const windowText = t("观察窗口 {from} 至 {to} · {total} 条输入 · {alerts} 个触发 · {observations} 个观察中",
     {...result, from: stamp(result.window.from), to: stamp(result.window.to)});
   return `<article class="card run-card">
     <div class="row spread"><h3>${run.mode === "trial" ? t("试跑") : t("正式检查")} · ${stamp(run.created_at)}</h3>
       <span class="meta">${t("规则第 {revision} 版", {revision: result.revision})}</span></div>
     <p class="meta">${windowText}</p>
+    ${review ? memoryContext(review.focus) : ""}
+    ${review?.count ? `<details class="memory-review" ${expanded ? "open" : ""}>
+      <summary>${t("记忆命中 {count} 条 · 查看代表记录", {count: review.count})}</summary>
+      ${review.items.map(item => evidenceBlock(item)).join("")}
+    </details>` : review ? `<p class="meta">${t("本次检查未命中记忆关注词。")}</p>` : ""}
     <details ${expanded ? "open" : ""}><summary>${t("查看研判与来源状态")}</summary>
       ${result.sources.length ? `<div class="topic-chips row">${result.sources.map(source =>
         pill(sourceName(source.source) + " · " + source.note, source.status === "failed" ? "r" : "g")).join("")}</div>` : ""}
