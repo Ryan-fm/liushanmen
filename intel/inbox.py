@@ -4,7 +4,7 @@ import re
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from .engine import matches_entities, record_text
-from .memory import focus_from_memory, rank_by_memory, searchable_text
+from .memory import focus_from_memory, rank_by_focus, searchable_text
 from .sources import CST, configured_sources, iso, normalize_text, now, web_url
 
 STOP_WORDS = {
@@ -179,7 +179,7 @@ def build_inbox(database, catalog, lang, *, at=None):
             else:
                 event_updates.append(event_story(event, summary))
         focus = focus_from_memory(task["notes"], lang)
-        for record in rank_by_memory(records, focus):
+        for record in rank_by_focus(records, focus):
             reports.append({"record": record, "task": summary, "events": events_by_record[record["id"]]})
 
     reports.sort(key=lambda row: (row["record"]["published_at"], row["record"]["id"]), reverse=True)

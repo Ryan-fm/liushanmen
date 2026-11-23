@@ -5,7 +5,8 @@ from threading import Lock
 from uuid import uuid4
 
 from .i18n import copy
-from .memory import focus_from_memory, phrase_pattern, rank_by_memory, searchable_text
+from .gold_quotes import DAILY_URL, DAYS as GOLD_DAYS, summarize_quotes
+from .memory import focus_from_memory, phrase_pattern, rank_by_focus, searchable_text
 from .rules import MINIMUM, NEWS_PROVIDERS, OWNER, TIME_WINDOW, InputError, validate
 from .sources import collect_sources, configured_sources, date, iso, normalize_text, now
 
@@ -29,6 +30,20 @@ NEWS = re.compile(r"新闻|资讯|报道|赛况|头条|公开动态|比赛结果
 NEWS_EN = re.compile(r"\b(?:news|headlines|press coverage|race reports?|race results?|public updates)\b", re.I)
 PRIVATE = re.compile(r"私域|内部|工单|客服|售后|退款|手机号|@|https?://|"
                      r"\b(?:internal|private|confidential|support tickets?|customer support|refunds?|phone numbers?)\b", re.I)
+TITLE_RACE = re.compile(r"世界冠军|世界冠軍|车手总冠军|車手總冠軍|总冠军|總冠軍|冠军争夺|冠軍爭奪|争冠|爭冠|"
+                        r"\b(?:world champion(?:ship)?|drivers?[’']? championship|title race|title fight|WDC)\b", re.I)
+QUESTION = re.compile(r"谁|誰|是什么|是什麼|[?？]|\b(?:who|what|why|how)\b", re.I)
+MONITOR_TOPICS = [(keys, tuple((alias, phrase_pattern(alias)) for alias in aliases))
+                  for aliases, keys in TOPIC_FEEDS.items()]
+CHAMPIONSHIP_FOCUS = (
+    ("冠军争夺",
+     ("世界冠军", "世界冠軍", "车手总冠军", "冠军争夺", "总冠军", "world champion",
+      "world championship", "drivers' championship", "drivers’ championship", "title race", "title fight", "title battle")),
+    ("车手积分",
+     ("车手积分", "积分榜", "积分差", "standings", "driver points", "points gap")),
+    ("关键赛果",
+     ("正赛结果", "赛果", "分站冠军", "race result", "race winner", "wins")),
+)
 
 
 def subject_from(intent):
@@ -57,6 +72,34 @@ def subject_from(intent):
     if not 2 <= len(subject) <= 60 or not re.search(r"[\u3400-\u9fffA-Za-z]", subject):
         return None
     return subject, subject, TOPIC_LOOKUP.get(normalize_text(subject), ((), ()))[1]
+
+
+def news_scope(intent, *, monitoring=False):
+    subject = subject_from(intent)
+    championship = bool(F1.search(intent) and TITLE_RACE.search(intent))
+    inferred = False
+    if subject is None and not PRIVATE.search(intent):
+        text = searchable_text(intent)
+        if championship and (monitoring or not QUESTION.search(intent)):
+            subject = ("F1", '"Formula 1"', F1_FEEDS)
+        elif monitoring and not QUESTION.search(intent):
+            choices = []
+            if F1.search(text):
+                choices.append(("F1", '"Formula 1"', F1_FEEDS))
+            for keys, aliases in MONITOR_TOPICS:
+                matches = [alias for alias, pattern in aliases if pattern.search(text)]
+                if matches:
+                    label = max(matches, key=len)
+                    choices.append((label, label, keys))
+            if len(choices) == 1:
+                subject = choices[0]
+        inferred = subject is not None
+    if not subject or not (inferred or championship):
+        return subject, None
+    topics = CHAMPIONSHIP_FOCUS if championship else ()
+    return subject, {"label": subject[0], "topics": [label for label, _ in topics],
+                     "terms": [term for _, terms in topics for term in terms],
+                     "ranking": {label: tuple(phrase_pattern(term) for term in terms) for label, terms in topics}}
 
 
 def aliases_for(label):
@@ -120,12 +163,14 @@ def highlight_by_source(items, limit):
 
 
 def highlight(items, limit=8):
-    preferred = [item for item in items if item.get("memory_hits")]
-    selected = highlight_by_source(preferred, limit)
-    if len(selected) < limit:
-        selected.extend(highlight_by_source(
-            [item for item in items if not item.get("memory_hits")], limit - len(selected)
-        ))
+    scoped = [item for item in items if item.get("scope_hits")]
+    preferred = [item for item in items if not item.get("scope_hits") and item.get("memory_hits")]
+    other = [item for item in items if not item.get("scope_hits") and not item.get("memory_hits")]
+    selected = []
+    for tier in (scoped, preferred, other):
+        if len(selected) == limit:
+            break
+        selected.extend(highlight_by_source(tier, limit - len(selected)))
     return selected
 
 
@@ -136,20 +181,28 @@ class NewsDiscovery:
         self._pending = {}
         self._lock = Lock()
 
-    def inspect(self, intent, draft, subject, *, on_progress=None):
+    def inspect(self, intent, draft, subject, *, scope=None, market=False, on_progress=None):
         label, search_term, direct = subject
         lang = draft.get("locale", "zh-CN")
-        hours = draft["hours"] if TIME_WINDOW.search(intent) else 168
+        hours = GOLD_DAYS * 24 if market else draft["hours"] if TIME_WINDOW.search(intent) else 168
         keys = [key for key in direct if key in self.catalog]
         query = "" if label == "F1" and keys else search_term
         notes = (note for task in self.database.tasks_with_memories()
                  if task_matches_subject(task, label) for note in task["notes"])
         focus = focus_from_memory(notes, lang)
+        scope_info = {"label": scope["label"], "topics": scope["topics"]} if scope else None
+        if scope_info and on_progress is not None:
+            on_progress("news_scope", scope_info)
+
+        def rank(items):
+            ranked = rank_by_focus(items, focus)
+            return rank_by_focus(ranked, scope["ranking"], match_key="scope_hits") if scope else ranked
 
         def source_result(entry, batch):
             found = preview_items(batch, hours, now())
             samples = [{"title": item["title"], "url": item["url"], "source": item["source"],
-                        "memory_hits": item.get("memory_hits", [])} for item in rank_by_memory(found, focus)[:2]]
+                        "memory_hits": item.get("memory_hits", []), "scope_hits": item.get("scope_hits", [])}
+                       for item in rank(found)[:2]]
             on_progress("source_result", {**entry, "matched": len(found), "samples": samples})
 
         def search(feed_keys, search_query):
@@ -165,7 +218,7 @@ class NewsDiscovery:
         items = preview_items(records, hours, nowish)
         with_results = {record["feed_id"] for record in items}
         working = [key for key in keys if key in with_results]
-        if keys and not query and not items:
+        if keys and not market and not query and not items:
             # Keep the failed source statuses visible; try broad search for this public subject.
             query = search_term
             fallback, fallback_logs = search([], query)
@@ -181,10 +234,11 @@ class NewsDiscovery:
         title_suffix = copy(lang, " 新闻跟踪", " News Monitoring")
         topic_suffix = copy(lang, " 新闻", " News")
         plan = validate({
-            **draft, "title": label[:64 - len(title_suffix)] + title_suffix,
+            **draft, "title": copy(lang, "黄金价格跟踪", "Gold price monitoring") if market else label[:64 - len(title_suffix)] + title_suffix,
             "scenario": "sports" if label == "F1" else draft["scenario"],
             "entities": aliases, "topics": [{
-                "label": label[:48 - len(topic_suffix)] + topic_suffix, "terms": aliases,
+                "label": copy(lang, "黄金收盘行情", "Gold daily close") if market else label[:48 - len(topic_suffix)] + topic_suffix,
+                "terms": scope["terms"] if scope and scope["terms"] else aliases,
                 "owner": draft["topics"][0]["owner"] if OWNER.search(intent) else copy(lang, "待分派", "Unassigned"),
                 "action": copy(lang, "查看报道原文和来源，核对新进展是否与已跟踪事件相关。",
                                "Open the original reporting and check how the new developments relate to tracked events."),
@@ -199,10 +253,13 @@ class NewsDiscovery:
             if len(self._pending) >= 32:
                 self._pending.pop(next(iter(self._pending)))
             self._pending[key] = {"intent": intent, "items": items, "expires": nowish + timedelta(minutes=30)}
-        return plan, {
+        preview = {
             "id": key, "label": label, "checked_at": iso(nowish), "count": len(items),
-            "items": highlight(rank_by_memory(items, focus)), "sources": logs, "memory_focus": list(focus),
+            "items": highlight(rank(items)), "sources": logs, "memory_focus": list(focus), "scope": scope_info,
         }
+        if market:
+            preview["market"] = {"quotes": summarize_quotes(items), "url": DAILY_URL}
+        return plan, preview
 
     def confirm(self, key, raw_plan):
         if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{32}", key):

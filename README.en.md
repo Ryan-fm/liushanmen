@@ -2,33 +2,49 @@
 
 [简体中文](README.md) · **English**
 
-A local intelligence agent. Describe what you want to track, watch sources return in real time, and decide whether to keep monitoring.
+A local-first intelligence monitoring agent. Define a topic in natural language, review a preview with sources, and confirm before starting scheduled checks. Task chat answers follow-ups using saved evidence and shared memory.
 
-## Quick start
+## Run locally
 
-Requires Python 3.11 or later. The app runs on the standard library.
+Requires Python 3.11+. The commands below use Python 3.11. The core uses the Python standard library and plain HTML, CSS, and JavaScript.
 
 ```sh
 git clone https://github.com/Ryan-fm/liushanmen.git
 cd liushanmen
-python3 app.py
+python3.11 app.py
 ```
 
-Open the [local workspace](http://127.0.0.1:8765/) and try “Track the latest F1 news.” Switch between English and Chinese in the top-right corner.
+Open the [local workspace](http://127.0.0.1:8765/) and try “Track the latest F1 news.” Use `--empty` to skip demo data or `--db` to select a database. The service binds to loopback and stores data in `data/` by default.
 
-## Features
+## Technical architecture
 
-- **Live search** queries Google News and Bing News in parallel and matches topics such as F1, NBA, and soccer to dedicated feeds.
-- **Daily intelligence inbox** groups similar coverage, highlights today's developments, and shows source failures and recoveries.
-- **Alerts and briefings** provide macOS desktop notifications and local Markdown briefings. Configure them in the inbox and keep the local service running.
-- **Custom monitoring** lets you set keywords, thresholds, and check intervals. Review the preview and confirm to start scheduled checks.
-- **Task charts and memory** show trends and sources, prioritize matching news and evidence, and draft rule changes for review.
-- **Event review** supports CSV / JSON imports, trial runs, evidence review, and Markdown briefings.
+| Layer | Implementation |
+| --- | --- |
+| Web and API | The [web interface](static/) calls a [Python HTTP server](app.py). Request `application/x-ndjson` from `POST /api/discover` to stream source status, sample records, and the final preview. |
+| Intent and retrieval | [Search routing](intel/news.py) identifies the topic and queries Google News, Bing News, and relevant RSS/Atom feeds in parallel. Dedicated adapters read [official F1 results](intel/f1_results.py) and [daily Au99.99 quotes from the Shanghai Gold Exchange](intel/gold_quotes.py). |
+| Monitoring and delivery | The [monitoring engine](intel/engine.py) evaluates lookback windows and thresholds for independent records and sources. Live checks persist evidence and events. The [daily inbox](intel/inbox.py) groups similar coverage and surfaces source failures. [Delivery](intel/delivery.py) handles macOS notifications and Markdown briefings. |
+| Chat and memory | [Task chat](intel/task_chat.py) reads task evidence, recent conversation, and memory. It validates citation IDs in model answers, with a local evidence fallback. The app writes explicit memory commands directly. Shared memory carries across tasks, while task memory informs task-level retrieval and analysis. |
+| Persistence | [SQLite storage](intel/store.py) tracks plans, evidence, events, runs, chat, memory, and the notification queue. Scheduled checks start after confirmation. Scheduling and delivery run inside the local service. |
 
-## Architecture
+### Agent workflow
 
-- The [web interface](static/) uses plain HTML, CSS, and JavaScript to display streamed search progress.
-- The [Python service](app.py) provides the API and scheduler. The [analysis modules](intel/) handle source retrieval, deduplication, and rule matching.
-- SQLite stores tasks, evidence, and events. Scheduled monitoring runs while the local service is active.
+1. Enter a goal and follow the retrieval progress. The preview includes original sources, matching interests, and failed reads.
+2. Confirm a monitoring plan. Adjust the sources, check cadence, and thresholds, or run a trial first.
+3. Review trends, evidence, and events in the task overview or ask follow-ups in Chat. Say “Remember: keep replies short” for a shared preference, or “Task memory: focus on driver changes” for a task-specific note.
 
-The analysis modules draw on the separation of responsibilities in [BettaFish](https://github.com/666ghj/BettaFish).
+## Model configuration
+
+Copy the [configuration template](.env.example) to `.env` and choose one setup. Task chat reads the file on the next question. Environment variables inherited at startup take precedence.
+
+- **Codex CLI** — Set `LSM_TASK_PROVIDER=codex` to use a local CLI signed in with ChatGPT. Set `LSM_TASK_CODEX_BIN` or `LSM_TASK_CODEX_MODEL` to select a binary or model. Inference goes to OpenAI through that login.
+- **OpenAI-compatible API** — Set `LSM_TASK_LLM_ENDPOINT`, `LSM_TASK_LLM_MODEL`, and `LSM_TASK_LLM_KEY` if the provider requires it. Use the full Chat Completions URL. For the official OpenAI endpoint, `OPENAI_MODEL` and `OPENAI_API_KEY` also work.
+
+External models receive the current question, recent conversation, relevant task material, and selected shared memories. Git ignores `.env` and local data.
+
+## Development checks
+
+```sh
+python3.11 -m unittest discover -s tests -v
+```
+
+Tests cover source parsing, checks and briefings, task isolation, shared memory, and citation validation. The analysis modules draw on the separation of responsibilities in [BettaFish](https://github.com/666ghj/BettaFish).

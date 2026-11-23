@@ -7,7 +7,7 @@ from hashlib import sha256
 from threading import Lock
 
 from .i18n import copy
-from .memory import focus_from_memory, rank_by_memory
+from .memory import focus_from_memory, rank_by_focus
 from .rules import InputError, model_json
 from .sources import collect_sources, configured_sources, date, iso, normalize_text, now
 
@@ -121,7 +121,7 @@ class Engine:
         }
         if focus:
             relevant = [record for record in observed if matches_entities(record_text(record), plan["entities"])]
-            matches = [record for record in rank_by_memory(relevant, focus) if record.get("memory_hits")]
+            matches = [record for record in rank_by_focus(relevant, focus) if record.get("memory_hits")]
             result["memory_review"] = {
                 "focus": list(focus), "count": len(matches),
                 "items": [{**record, "text": record["text"][:800]} for record in matches[:3]],
@@ -222,7 +222,7 @@ class Engine:
                                 " Some feeds failed. Counts cover the available data.")
         grouped = Counter(hit["entity"] for hit in evidence if hit["entity"])
         ordered = sorted(evidence, key=lambda hit: hit["published_at"], reverse=True)
-        ordered = rank_by_memory(ordered, focus)
+        ordered = rank_by_focus(ordered, focus)
         # Show at least one representative record from each source before filling the remaining slots.
         representatives = {}
         for hit in ordered:

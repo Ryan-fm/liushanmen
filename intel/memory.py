@@ -14,6 +14,17 @@ INTRO = re.compile(
 SEPARATORS = re.compile(r"[,，、；;。！？!?\n]|以及|\s+and\s+", re.I)
 EXCLUSION = re.compile(r"无需|不用|不再|不要|忽略|排除|\b(?:ignore|exclude|skip|do not|don't)\b", re.I)
 SEPARATOR_SPACE = re.compile(r"[\s\-‐‑‒–—]+")
+NICKNAME_PREFIX = "称呼："
+SELF_NAME = re.compile(
+    r"^(?:我叫\s*|我的(?:名字|称呼)是\s*|以后叫我\s*|my name is\s+|call me\s+)([^\n]{1,60})$", re.I,
+)
+REMEMBER_VERB = r"(?:记下来|记一下|记下|记住|保存到(?:任务)?记忆)"
+REMEMBER_START = re.compile(r"^(?:(?:请|你|帮我|麻烦你)\s*)*" + REMEMBER_VERB + r"\s*[:：,，]?\s*", re.I)
+REMEMBER_END = re.compile(r"(?:[\s,，。；;]+(?:(?:请|你|帮我)\s*)?" + REMEMBER_VERB +
+                          r"|[,，]\s*remember (?:that|it))$", re.I)
+REMEMBER_EN = re.compile(r"^(?:please\s+)?remember(?:\s+that\b|\b)\s*[:：]?\s*", re.I)
+REMEMBER_POINTER = re.compile(r"^(?:这个|这条|这件事|刚才那句|上面这句|我的(?:名字|称呼)|it|that|this|my name)?[吧呀啊哈哦]?$", re.I)
+MEMORY_SCOPE = re.compile(r"^(全局记忆|任务记忆|workspace memory|task memory)\s*[:：]\s*", re.I)
 FOCUS_ALIASES = (
     ("安全车", "Safety car", ("安全车", "safety car", "safety cars")),
     ("车手变动", "Driver changes", (
@@ -25,7 +36,53 @@ FOCUS_ALIASES = (
 )
 
 
+def memory_nickname(text):
+    return text.removeprefix(NICKNAME_PREFIX).strip() if text.startswith(NICKNAME_PREFIX) else ""
+
+
+def explicit_nickname(text):
+    match = SELF_NAME.fullmatch(text.strip(" \t。！!"))
+    name = match[1].strip(" \t\"'“”‘’「」") if match else ""
+    return "" if name in {"什么", "什么名字", "啥", "啥名字"} or re.search(r"[?？。！!]", name) else name
+
+
+def remember_request(question):
+    """Return a requested note, an empty reference to prior context, or None."""
+    text = question.strip()
+    if text.endswith(("?", "？")) or re.match(r"^(?:请\s*)?(?:别|不要|不用|记住了|do not\b|don't\b)", text, re.I):
+        return None
+    text = text.rstrip("。！!.")
+    if match := REMEMBER_END.search(text):
+        text = text[:match.start()]
+    elif match := REMEMBER_START.match(text) or REMEMBER_EN.match(text):
+        text = text[match.end():]
+    elif text.startswith("以后叫我") and (name := explicit_nickname(text)):
+        return NICKNAME_PREFIX + name
+    elif MEMORY_SCOPE.match(text):
+        return text
+    else:
+        return None
+    text = text.strip(" \t，,。;；")
+    if REMEMBER_POINTER.fullmatch(text):
+        return ""
+    name = explicit_nickname(text)
+    return NICKNAME_PREFIX + name if name else text
+
+
+def scoped_chat_memory(text):
+    explicit = MEMORY_SCOPE.match(text)
+    content = text[explicit.end():].strip() if explicit else text
+    if name := explicit_nickname(content):
+        content = NICKNAME_PREFIX + name
+    if memory_nickname(content):
+        return "workspace", content
+    task_scope = explicit[1].casefold() in {"任务记忆", "task memory"} if explicit else bool(KEYWORDS.match(content))
+    return ("task" if task_scope else "workspace"), content
+
+
 def terms_from_memory(text):
+    if memory_nickname(text):
+        return []
     if match := KEYWORDS.search(text):
         phrases = SEPARATORS.split(match[1])
     else:
@@ -66,7 +123,7 @@ def focus_from_memory(notes, lang):
     return {label: tuple(phrase_pattern(alias) for alias in aliases) for label, aliases in labels.values()}
 
 
-def rank_by_memory(records, focus):
+def rank_by_focus(records, focus, *, match_key="memory_hits"):
     if not focus:
         return records
     ranked = []
@@ -81,7 +138,7 @@ def rank_by_memory(records, focus):
                 matched.append(label)
             elif any(pattern.search(content) for pattern in patterns):
                 matched.append(label)
-        item = {**record, "memory_hits": matched} if matched else record
+        item = {**record, match_key: matched} if matched else record
         ranked.append((title_hits, len(matched), item))
     ranked.sort(key=lambda item: item[:2], reverse=True)
     return [item for _, _, item in ranked]

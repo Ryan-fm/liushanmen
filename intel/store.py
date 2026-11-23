@@ -8,8 +8,10 @@ import sqlite3
 from uuid import uuid4
 
 from .i18n import copy
+from .gold_quotes import SOURCE_ID, summarize_quotes
+from .memory import NICKNAME_PREFIX, memory_nickname
 from .rules import InputError
-from .sources import date, iso, now
+from .sources import CST, date, iso, now
 
 DEFAULT_DELIVERY = {"alerts": False, "daily": False, "time": "20:00", "locale": "zh-CN"}
 
@@ -39,6 +41,18 @@ class Database:
                     id TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                     PRIMARY KEY (task_id, id)
                 );
+                CREATE TABLE IF NOT EXISTS workspace_memory (
+                    id TEXT PRIMARY KEY, text TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS task_chat (
+                    id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    question TEXT NOT NULL, reply TEXT NOT NULL, created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS task_dashboards (
+                    task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+                    layout TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS task_chat_order ON task_chat(task_id, created_at);
                 CREATE TABLE IF NOT EXISTS runs (
                     id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
                     mode TEXT NOT NULL, created_at TEXT NOT NULL, result TEXT NOT NULL
@@ -60,6 +74,26 @@ class Database:
                     day TEXT PRIMARY KEY, created_at TEXT NOT NULL, markdown TEXT NOT NULL
                 );
             """)
+            self._migrate_workspace_name(connection)
+
+    @staticmethod
+    def _migrate_workspace_name(connection):
+        connection.execute("BEGIN IMMEDIATE")
+        marker = "workspace_memory_v1"
+        if connection.execute("SELECT 1 FROM meta WHERE name=?", (marker,)).fetchone():
+            return
+        prefix = NICKNAME_PREFIX + "%"
+        existing = connection.execute("SELECT 1 FROM workspace_memory WHERE text LIKE ?", (prefix,)).fetchone()
+        if not existing:
+            row = connection.execute("""
+                SELECT m.id,m.text,m.created_at,m.updated_at FROM task_memory m JOIN tasks t ON t.id=m.task_id
+                WHERE t.demo=0 AND m.text LIKE ? ORDER BY m.updated_at DESC,m.rowid DESC LIMIT 1
+            """, (prefix,)).fetchone()
+            if row and memory_nickname(row["text"]):
+                connection.execute("INSERT INTO workspace_memory VALUES(?,?,?,?)", tuple(row))
+                connection.execute("DELETE FROM task_memory WHERE text=? AND task_id IN (SELECT id FROM tasks WHERE demo=0)",
+                                   (row["text"],))
+        connection.execute("INSERT INTO meta VALUES(?,?)", (marker, "1"))
 
     @contextmanager
     def connect(self):
@@ -93,6 +127,17 @@ class Database:
         with self.connect() as connection:
             return self.task_row(connection.execute("SELECT * FROM tasks WHERE id=?", (key,)).fetchone())
 
+    def remove_task(self, key):
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "DELETE FROM notification_outbox WHERE kind='change' "
+                "AND id IN (SELECT 'change:' || id FROM runs WHERE task_id=?)", (key,)
+            )
+            removed = connection.execute("DELETE FROM tasks WHERE id=?", (key,))
+            if removed.rowcount != 1:
+                raise InputError("找不到任务")
+
     def index(self):
         with self.connect() as connection:
             data = connection.execute("""
@@ -115,10 +160,27 @@ class Database:
 
     def insights(self, key):
         self.task(key)
+        today = now().astimezone(CST).date()
+        days = {(today - timedelta(days=days_ago)).isoformat(): 0 for days_ago in range(6, -1, -1)}
+        counts = Counter()
+        recent = []
+        quote_records = []
         with self.connect() as connection:
-            counts = Counter(json.loads(row["data"])["source"] for row in connection.execute(
-                "SELECT data FROM evidence WHERE task_id=?", (key,)
-            ))
+            for row in connection.execute("SELECT data FROM evidence WHERE task_id=? ORDER BY rowid", (key,)):
+                item = json.loads(row["data"])
+                counts[item["source"]] += 1
+                if item.get("feed_id") == SOURCE_ID and item.get("quote"):
+                    quote_records.append(item)
+                at = item["published_at"]
+                day = date(at).astimezone(CST).date().isoformat()
+                if day in days:
+                    days[day] += 1
+                if len(recent) < 4 or at > recent[-1]["published_at"]:
+                    recent.append({field: item.get(field) for field in ("id", "title", "source", "url", "published_at")})
+                    if not recent[-1]["title"]:
+                        recent[-1]["title"] = item["text"][:100]
+                    recent.sort(key=lambda entry: entry["published_at"], reverse=True)
+                    del recent[4:]
             rows = connection.execute(
                 "SELECT id, created_at, result FROM runs WHERE task_id=? AND mode='live' "
                 "ORDER BY created_at DESC,rowid DESC LIMIT 10", (key,)
@@ -129,7 +191,22 @@ class Database:
                         sorted(counts.items(), key=lambda entry: (-entry[1], entry[0].casefold()))[:5]],
             "checks": [{"id": row["id"], "at": row["created_at"], "count": json.loads(row["result"])["total"]}
                        for row in reversed(rows)],
+            "activity": [{"day": day, "count": count} for day, count in days.items()],
+            "recent": recent,
+            "gold_quotes": summarize_quotes(quote_records),
         }
+
+    def dashboard_layout(self, key):
+        with self.connect() as connection:
+            row = connection.execute("SELECT layout FROM task_dashboards WHERE task_id=?", (key,)).fetchone()
+        return json.loads(row["layout"]) if row else None
+
+    def save_dashboard_layout(self, key, layout):
+        with self.connect() as connection:
+            if layout is None:
+                connection.execute("DELETE FROM task_dashboards WHERE task_id=?", (key,))
+            else:
+                connection.execute("INSERT OR REPLACE INTO task_dashboards VALUES(?,?)", (key, pack(layout)))
 
     def memories(self, key):
         self.task(key)
@@ -164,10 +241,68 @@ class Database:
 
     def add_memory(self, key, text):
         self.task(key)
-        note_id, stamp = uuid4().hex[:12], iso(now())
         with self.connect() as connection:
-            connection.execute("INSERT INTO task_memory VALUES(?,?,?,?,?)", (key, note_id, text, stamp, stamp))
+            return self._insert_memory(connection, key, text)
+
+    @staticmethod
+    def _insert_memory(connection, key, text):
+        note_id, stamp = uuid4().hex[:12], iso(now())
+        connection.execute("INSERT INTO task_memory VALUES(?,?,?,?,?)", (key, note_id, text, stamp, stamp))
         return {"id": note_id, "text": text, "created_at": stamp, "updated_at": stamp}
+
+    def _remember_chat_note(self, connection, key, text):
+        row = connection.execute(
+            "SELECT id,text,created_at,updated_at FROM task_memory WHERE task_id=? AND text=? "
+            "ORDER BY updated_at DESC,rowid DESC LIMIT 1", (key, text)
+        ).fetchone()
+        return dict(row) if row else self._insert_memory(connection, key, text)
+
+    def workspace_memories(self):
+        with self.connect() as connection:
+            return [dict(row) for row in connection.execute(
+                "SELECT id,text,created_at,updated_at FROM workspace_memory ORDER BY updated_at DESC,rowid DESC"
+            )]
+
+    @staticmethod
+    def _remember_workspace_note(connection, text):
+        operator, value = ("LIKE", NICKNAME_PREFIX + "%") if memory_nickname(text) else ("=", text)
+        row = connection.execute(
+            f"SELECT id,text,created_at,updated_at FROM workspace_memory WHERE text {operator} ? "
+            "ORDER BY updated_at DESC,rowid DESC LIMIT 1", (value,)
+        ).fetchone()
+        stamp = iso(now())
+        if row:
+            note = dict(row)
+            if note["text"] != text:
+                connection.execute("UPDATE workspace_memory SET text=?,updated_at=? WHERE id=?", (text, stamp, note["id"]))
+                note.update(text=text, updated_at=stamp)
+            return note
+        note = {"id": uuid4().hex[:12], "text": text, "created_at": stamp, "updated_at": stamp}
+        connection.execute("INSERT INTO workspace_memory VALUES(:id,:text,:created_at,:updated_at)", note)
+        return note
+
+    def add_workspace_memory(self, text):
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._remember_workspace_note(connection, text)
+
+    def update_workspace_memory(self, note_id, text):
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if memory_nickname(text) and connection.execute(
+                "SELECT 1 FROM workspace_memory WHERE id<>? AND text LIKE ?", (note_id, NICKNAME_PREFIX + "%")
+            ).fetchone():
+                raise InputError("已保存称呼，请编辑原有的称呼记忆。")
+            cursor = connection.execute("UPDATE workspace_memory SET text=?,updated_at=? WHERE id=?",
+                                        (text, iso(now()), note_id))
+            if cursor.rowcount != 1:
+                raise InputError("找不到这条记忆。")
+            return dict(connection.execute("SELECT * FROM workspace_memory WHERE id=?", (note_id,)).fetchone())
+
+    def remove_workspace_memory(self, note_id):
+        with self.connect() as connection:
+            if connection.execute("DELETE FROM workspace_memory WHERE id=?", (note_id,)).rowcount != 1:
+                raise InputError("找不到这条记忆。")
 
     def update_memory(self, key, note_id, text):
         with self.connect() as connection:
@@ -213,12 +348,36 @@ class Database:
         if connection is not None:
             return write(connection)
         with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM tasks WHERE id=?", (key,)).fetchone() is None:
+                raise InputError("找不到任务")
             return write(conn)
 
     def records(self, key):
         with self.connect() as connection:
             rows = connection.execute("SELECT data FROM evidence WHERE task_id=?", (key,)).fetchall()
         return [json.loads(row["data"]) for row in rows]
+
+    def chat_history(self, key, limit=60):
+        self.task(key)
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT id,question,reply,created_at FROM task_chat WHERE task_id=? "
+                "ORDER BY created_at DESC,rowid DESC LIMIT ?", (key, limit),
+            ).fetchall()
+        return [{**dict(row), "reply": json.loads(row["reply"])} for row in reversed(rows)]
+
+    def save_chat_turn(self, key, question, reply, *, remember=None, memory_scope="workspace"):
+        turn = {"id": uuid4().hex, "question": question, "reply": reply, "created_at": iso(now())}
+        with self.connect() as connection:
+            if remember is not None:
+                connection.execute("BEGIN IMMEDIATE")
+                note = (self._remember_workspace_note(connection, remember) if memory_scope == "workspace" else
+                        self._remember_chat_note(connection, key, remember))
+                turn["reply"] = {**reply, "memory": {**note, "scope": memory_scope}}
+            connection.execute("INSERT INTO task_chat(id,task_id,question,reply,created_at) VALUES(?,?,?,?,?)",
+                               (turn["id"], key, question, pack(turn["reply"]), turn["created_at"]))
+        return turn
 
     def inbox_snapshot(self, start, end):
         with self.connect() as connection:
@@ -346,6 +505,8 @@ class Database:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             current = connection.execute("SELECT revision,active FROM tasks WHERE id=?", (task["id"],)).fetchone()
+            if current is None:
+                raise InputError("找不到任务")
             if current["revision"] != task["revision"]:
                 raise InputError("规则已更新，请按新规则重新运行")
             if mode == "live" and not current["active"]:

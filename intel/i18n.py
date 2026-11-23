@@ -13,6 +13,9 @@ def copy(lang, chinese, english):
 
 
 ERRORS = {
+    "请确认删除该任务。": "Confirm removal of this task.",
+    "请选择至少一个可用的概览模块。": "Select at least one available overview module.",
+    "请指定想查看的模块，例如「只看图表」或「来源分布放最前面」。": "Name the modules you want, such as “charts only” or “sources first”.",
     "请检查提醒开关与简报时间。": "Check the notification options and briefing time.",
     "当前设备无法发送桌面提醒。": "Desktop notifications are unavailable on this device.",
     "桌面提醒发送失败。": "The desktop notification could not be sent.",
@@ -55,6 +58,8 @@ ERRORS = {
     "kind 只接受 internal、public 或 media": "The kind field must be internal, public, or media.",
 }
 FIELDS = {
+    "布局需求": "Layout instructions", "概览模块": "Overview modules", "概览标题": "Overview title",
+    "任务提问": "Task question",
     "公开搜索渠道": "Public news providers",
     "记忆内容": "Memory note", "规则版本": "Rule version",
     "监测需求": "Monitoring request", "原始需求": "Original request", "来源名称": "Source name",

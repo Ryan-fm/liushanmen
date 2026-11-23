@@ -1,5 +1,6 @@
 """六扇门, local inspection workstation. Python 3.11+; no external packages."""
 import argparse
+from collections import ChainMap
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -11,16 +12,21 @@ from pathlib import Path
 from threading import Event, Thread
 from urllib.parse import parse_qs, urlsplit
 
+from intel.chat_model import CodexChatModel, chat_model, load_env, read_env
+from intel.dashboard import apply_instruction, infer_dashboard, validate_layout
 from intel.demo import seed
 from intel.delivery import Delivery
 from intel.engine import Engine
+from intel.f1_results import lookup_winner, race_question
+from intel.gold_quotes import INSTRUMENT, SOURCE_ID, gold_price_request
 from intel.i18n import copy, error_text, locale
 from intel.inbox import build_inbox
 from intel.memory import draft_from_memory
-from intel.news import NewsDiscovery, subject_from
-from intel.rules import InputError, integer, propose, string, validate
+from intel.news import NewsDiscovery, news_scope
+from intel.rules import InputError, integer, propose, string, template, validate
 from intel.sources import KINDS, feeds, iso, normalize, now
 from intel.store import Database, pack
+from intel.task_chat import answer_task_question, memory_turn
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -76,24 +82,46 @@ def write_report(task, lang="zh-CN"):
 
 
 class Application:
-    def __init__(self, database, engine, configured_feeds):
+    def __init__(self, database, engine, configured_feeds, *, chat_model_lookup=chat_model):
         self.database = database
         self.engine = engine
         self.feeds = configured_feeds
         self.news = NewsDiscovery(database, configured_feeds)
         self.delivery = Delivery(database, configured_feeds)
+        self.chat_model_lookup = chat_model_lookup
 
     def discover(self, body, *, on_progress=None, lang="zh-CN"):
         intent = string(body.get("intent"), "监测需求", 1000, True)
-        subject = subject_from(intent)
-        plan, note = propose(intent, body.get("useModel") is True and subject is None, self.feeds, lang=lang)
-        if subject:
-            plan, preview = self.news.inspect(intent, plan, subject, on_progress=on_progress)
+        if gold_price_request(intent):
+            if on_progress is not None:
+                on_progress("gold_quote_lookup", {})
+            plan, preview = self.news.inspect(intent, template(intent, lang), (INSTRUMENT, "", (SOURCE_ID,)),
+                                              market=True, on_progress=on_progress)
             return {"plan": plan, "preview": preview}
+        if question := race_question(intent):
+            if on_progress is not None:
+                on_progress("official_result_lookup", {})
+            return {"answer": lookup_winner(question)}
+        subject, scope = news_scope(intent, monitoring=body.get("mode") == "monitor")
+        if subject:
+            plan, preview = self.news.inspect(intent, template(intent, lang), subject, scope=scope, on_progress=on_progress)
+            return {"plan": plan, "preview": preview}
+        plan, note = propose(intent, body.get("useModel") is True, self.feeds, lang=lang)
         return {"plan": plan, "note": note}
 
     def handle(self, method, path, body, *, lang="zh-CN"):
         db = self.database
+        if path == ["memory"]:
+            if method == "GET":
+                return {"notes": db.workspace_memories()}
+            if method == "POST":
+                return db.add_workspace_memory(string(body.get("text"), "记忆内容", 2000, True))
+        if method == "POST" and path[:1] == ["memory"] and len(path) >= 2:
+            if len(path) == 2:
+                return db.update_workspace_memory(path[1], string(body.get("text"), "记忆内容", 2000, True))
+            if path[2:] == ["remove"]:
+                db.remove_workspace_memory(path[1])
+                return {"removed": True}
         if method == "GET" and path == ["inbox"]:
             return build_inbox(db, self.feeds, lang)
         if path == ["delivery"]:
@@ -129,8 +157,46 @@ class Application:
         tail = path[2:]
         if method == "GET" and not tail:
             return db.detail(task_id)
+        if method == "POST" and tail == ["remove"]:
+            if body.get("confirmed") is not True:
+                raise InputError("请确认删除该任务。")
+            db.remove_task(task_id)
+            return {"removed": True}
         if method == "GET" and tail == ["insights"]:
             return db.insights(task_id)
+        if tail in (["dashboard"], ["dashboard", "preview"]):
+            task = db.task(task_id)
+            inferred = infer_dashboard(task, lang)
+            saved = db.dashboard_layout(task_id)
+            layout = {**inferred, **saved, "custom": True} if saved else inferred
+            if method == "GET" and tail == ["dashboard"]:
+                return layout
+            if method == "POST" and tail == ["dashboard", "preview"]:
+                instruction = string(body.get("instruction"), "布局需求", 500, True)
+                if isinstance(body.get("layout"), dict):
+                    layout = {**layout, **validate_layout(body["layout"])}
+                return apply_instruction(layout, instruction)
+            if method == "POST" and tail == ["dashboard"]:
+                if body.get("reset") is True:
+                    db.save_dashboard_layout(task_id, None)
+                    return inferred
+                changes = validate_layout(body)
+                db.save_dashboard_layout(task_id, changes)
+                return {**inferred, **changes, "custom": True}
+        if tail == ["chat"]:
+            if method == "GET":
+                settings = self.chat_model_lookup()
+                model = {"name": settings.name, "local": settings.local} if settings else None
+                if isinstance(settings, CodexChatModel):
+                    model["provider"] = "codex"
+                return {"turns": db.chat_history(task_id), "model": model}
+            if method == "POST":
+                question = string(body.get("question"), "任务提问", 1000, True)
+                if turn := memory_turn(db, task_id, question, lang):
+                    return turn
+                answer = answer_task_question(db, task_id, question, lang, use_model=body.get("useModel") is not False,
+                                              model_lookup=self.chat_model_lookup)
+                return db.save_chat_turn(task_id, question, answer)
         if tail == ["memory"]:
             if method == "GET":
                 return {"notes": db.memories(task_id)}
@@ -354,6 +420,9 @@ def run_delivery(app, stop):
 
 
 def main():
+    env_path = ROOT / ".env"
+    inherited = os.environ.copy()
+    load_env(env_path)
     parser = argparse.ArgumentParser(description="六扇门本地情报工作台")
     parser.add_argument("--port", default=8765, type=int)
     parser.add_argument("--db", default=ROOT / "data" / "liushanmen.sqlite3", type=Path)
@@ -364,7 +433,8 @@ def main():
     db = Database(args.db)
     feed_catalog = feeds()
     engine = Engine(db, feed_catalog)
-    application = Application(db, engine, feed_catalog)
+    application = Application(db, engine, feed_catalog,
+                              chat_model_lookup=lambda: chat_model(ChainMap(inherited, read_env(env_path))))
     if not args.empty:
         seed(db, engine, feed_catalog)
     stop = Event()

@@ -230,14 +230,14 @@ def template(intent, lang="zh-CN"):
     }
 
 
-def model_json(instructions, context):
+def model_json(instructions, context, *, settings=None, open_request=urlopen, timeout=12):
     """Optional OpenAI-compatible endpoint configured by the local operator."""
-    endpoint = os.environ.get("LSM_LLM_ENDPOINT")
-    model = os.environ.get("LSM_LLM_MODEL")
+    endpoint = settings.endpoint if settings else os.environ.get("LSM_LLM_ENDPOINT")
+    model = settings.name if settings else os.environ.get("LSM_LLM_MODEL")
     if not endpoint or not model:
         return None
     headers = {"Content-Type": "application/json"}
-    if key := os.environ.get("LSM_LLM_KEY"):
+    if key := (settings.key if settings else os.environ.get("LSM_LLM_KEY")):
         headers["Authorization"] = "Bearer " + key
     payload = {
         "model": model, "temperature": 0.2,
@@ -248,7 +248,7 @@ def model_json(instructions, context):
     }
     try:
         request = Request(endpoint, data=json.dumps(payload).encode(), headers=headers, method="POST")
-        with urlopen(request, timeout=12) as result:
+        with open_request(request, timeout=timeout) as result:
             response = json.loads(result.read(1024 * 1024))
         content = response["choices"][0]["message"]["content"].strip()
         content = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", content)

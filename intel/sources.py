@@ -45,6 +45,8 @@ BUILTIN_FEEDS = {
     "techcrunch": {"name": "TechCrunch", "url": "https://techcrunch.com/feed/", "group": "tech"},
     "federal-reserve": {"name": "美联储公告", "url": "https://www.federalreserve.gov/feeds/press_all.xml",
                         "entity": "美联储", "group": "finance"},
+    "sge-au9999": {"name": "上海黄金交易所 · Au99.99", "url": "https://www.sge.com.cn/sjzx/quotation_daily_new",
+                   "entity": "Au99.99", "group": "finance", "source_type": "sge_au9999"},
     "rthk-finance": {"name": "香港电台 · 财经", "url": "https://rthk9.rthk.hk/rthk/news/rss/c_expressnews_cfinance.xml",
                      "entity": "财经", "group": "finance"},
     "rthk-sports": {"name": "香港电台 · 体育", "url": "https://rthk9.rthk.hk/rthk/news/rss/c_expressnews_csport.xml",
@@ -151,6 +153,9 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 def get_feed(config):
+    if config.get("source_type") == "sge_au9999":
+        from .gold_quotes import get_gold_feed
+        return get_gold_feed()
     # URLs are only editable by the local operator via process configuration.
     # Do not follow redirects or accept URL inputs from browser requests.
     request = Request(config["url"], headers={"User-Agent": "Liushanmen-RSS/0.1"})
