@@ -18,7 +18,8 @@ Open the [local workspace](http://127.0.0.1:8765/) and try “Track the latest F
 
 ## Features
 
-- **Live search** shows sources, headlines, and article links from RSS / Atom feeds and Google News.
+- **Live search** queries Google News and Bing News in parallel and matches topics such as F1, NBA, and soccer to dedicated feeds.
+- **Daily intelligence inbox** groups similar coverage, highlights today's developments, and shows source failures and recoveries.
 - **Custom monitoring** lets you set keywords, thresholds, and check intervals. Review the preview and confirm to start scheduled checks.
 - **Task charts and memory** show trends and sources, prioritize matching news and evidence, and draft rule changes for review.
 - **Event review** supports CSV / JSON imports, trial runs, evidence review, and Markdown briefings.

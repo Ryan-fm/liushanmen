@@ -13,6 +13,8 @@ def copy(lang, chinese, english):
 
 
 ERRORS = {
+    "公开新闻搜索渠道不正确。": "Unknown public news provider.",
+    "请至少选择一个公开新闻搜索渠道。": "Select at least one public news provider.",
     "请补充关注对象或希望解决的问题": "Describe what you want to track or the problem you want to investigate.",
     "请选择启用或暂停": "Choose whether to enable or pause this task.",
     "每次导入 1 至 3000 条记录": "Import between 1 and 3,000 records at a time.",
@@ -50,6 +52,7 @@ ERRORS = {
     "kind 只接受 internal、public 或 media": "The kind field must be internal, public, or media.",
 }
 FIELDS = {
+    "公开搜索渠道": "Public news providers",
     "记忆内容": "Memory note", "规则版本": "Rule version",
     "监测需求": "Monitoring request", "原始需求": "Original request", "来源名称": "Source name",
     "处理备注": "Progress note", "主题名称": "Topic name", "关键词": "Keywords",

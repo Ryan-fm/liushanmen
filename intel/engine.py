@@ -58,7 +58,8 @@ class Engine:
         # Do not fetch new RSS entries for a historical run.
         source_log = []
         incoming = []
-        selected = configured_sources(self.feeds, plan["feeds"], plan.get("news_query", ""), plan["hours"])
+        selected = configured_sources(self.feeds, plan["feeds"], plan.get("news_query", ""), plan["hours"],
+                                      plan.get("news_providers"))
         if not at:
             incoming, source_log = collect_sources(selected, lang=lang)
             # Undated feeds use the first-seen time, so set the live cutoff after collection.

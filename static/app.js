@@ -40,9 +40,15 @@ const stamp = value => value ? new Intl.DateTimeFormat(language() === "en" ? "en
   minute: "2-digit", hourCycle: "h23",
 }).format(new Date(value)) : "—";
 const joinTerms = values => values.join(language() === "en" ? ", " : "、");
-const builtinNames = new Set(["Formula 1 官方", "Python 发布记录", "BettaFish 发布记录"]);
+const builtinNames = new Set([
+  "Formula 1 官方", "Python 发布记录", "BettaFish 发布记录", "BBC Sport · 足球", "ESPN · 足球", "OpenAI 官方",
+  "Hugging Face 博客", "BBC 科技", "美联储公告", "香港电台 · 财经", "香港电台 · 体育", "香港电台 · 大中华",
+  "arXiv · AI 预印本", "NASA 官方",
+]);
+const newsProviderNames = { google: "Google 新闻", bing: "Bing 新闻" };
 const sourceName = name => {
-  if (name.startsWith("Google 新闻 · ")) return t("Google 新闻") + name.slice("Google 新闻".length);
+  const provider = Object.values(newsProviderNames).find(label => name.startsWith(label + " · "));
+  if (provider) return t(provider) + name.slice(provider.length);
   return builtinNames.has(name) ? t(name) : name;
 };
 const pill = (text, tone = "") => `<span class="pill ${escape(tone)}">${escape(text)}</span>`;
@@ -144,7 +150,7 @@ function parseRoute() {
     const tab = ["rules", "sources", "runs", "event"].includes(parts[2]) ? parts[2] : "summary";
     return { name: "task", id: parts[1], tab, extra: parts[3] || "" };
   }
-  return { name: parts[0] === "events" ? "events" : "overview" };
+  return { name: ["events", "inbox"].includes(parts[0]) ? parts[0] : "overview" };
 }
 
 function showLayout(route) {
@@ -166,12 +172,13 @@ async function refresh({ focus = false, editedRules = null } = {}) {
     closeMenu();
   }
   try {
-    const [{ tasks: allTasks }, task, evidence, insights, memories] = await Promise.all([
+    const [{ tasks: allTasks }, task, evidence, insights, memories, inbox] = await Promise.all([
       api("/api/tasks"),
       route.name === "task" ? api(apiTask(route.id)) : Promise.resolve(null),
       route.tab === "sources" ? api(apiTask(route.id) + "/evidence") : Promise.resolve(null),
       route.tab === "summary" ? api(apiTask(route.id) + "/insights") : Promise.resolve(null),
       route.tab === "summary" ? api(apiTask(route.id) + "/memory") : Promise.resolve({ notes: [] }),
+      route.name === "inbox" ? api("/api/inbox") : Promise.resolve(null),
     ]);
     if (sequence !== state.sequence) return;
     const userTasks = allTasks.filter(item => !item.demo);
@@ -188,6 +195,7 @@ async function refresh({ focus = false, editedRules = null } = {}) {
     nav(tasks, route, task?.plan.title);
     if (route.name === "home") renderHome(userTasks);
     else if (route.name === "overview") renderOverview();
+    else if (route.name === "inbox") renderInbox(inbox);
     else if (route.name === "events") renderEvents(events);
     else renderTask(task, route, { evidence, editedRules, insights });
     if (route.name === "overview" && focusComposerOnLoad) {
@@ -219,7 +227,7 @@ function nav(tasks, route, taskTitle) {
     </div>` : "").join("");
   document.querySelector("#crumb").textContent = route.name === "task"
     ? (taskTitle || t("监测任务"))
-    : route.name === "events" ? t("事件中心") : t("Agent 工作台");
+    : t({ inbox: "今日情报", events: "事件中心" }[route.name] || "Agent 工作台");
 }
 
 function renderOverview() {
@@ -432,7 +440,8 @@ function renderNews(agent) {
       </time>${memoryMatch(item)}</div>
       <h2>${link ? `<a href="${escape(link)}" target="_blank" rel="noopener noreferrer">${escape(item.title)}${icon("diagonal")}</a>` : escape(item.title)}</h2>
       ${item.summary ? `<p>${escape(item.summary)}</p>` : ""}
-      ${item.via_news_search ? `<span class="meta">${t("通过 Google 新闻查看")}</span>` : ""}
+      ${item.via_news_search ? `<span class="meta">${t("通过 Google 新闻查看")}</span>`
+        : item.news_provider === "bing" ? `<span class="meta">${t("由 Bing 新闻检索")}</span>` : ""}
     </li>`;
   });
   const sources = preview.sources.map(source => pill(sourceName(source.source) + (source.status === "ok" ? "" : " · " + t("读取失败")),
@@ -514,6 +523,81 @@ async function requestPlan(form) {
       (document.querySelector(".reply-title") || document.querySelector("#agent-intent"))?.focus();
     }
   }
+}
+
+function renderInbox(inbox) {
+  const priority = inbox.stories.filter(story => story.priority || story.focus.length).length;
+  const failed = inbox.failures.filter(source => !source.recovered_at).length;
+  page.innerHTML = `<div class="inbox-title page-title">
+    <div><p class="inbox-date">${icon("clock")} <time datetime="${escape(inbox.date)}">${escape(inbox.date)}</time> ${t("北京时间")}</p>
+      <h1>${t("今日情报收件箱")}</h1><p>${t("关注任务的当日报道与事件更新。")}</p></div>
+    ${button(t("刷新收件箱"), "refresh-inbox")}
+  </div>
+  <div class="overview-metrics" aria-label="${t("今日概况")}">
+    ${metric("inbox", t("今日进展"), inbox.stories.length)}
+    ${metric("signal", t("优先查看"), priority)}
+    ${metric("news", t("来源待检查"), failed)}
+  </div>
+  <div class="inbox-layout">
+    <section class="inbox-stories"><div class="section-heading"><h2>${t("今日进展")}</h2>
+      <span class="meta">${t("{count} 个关注任务", {count: inbox.task_count})}</span></div>
+      ${inbox.stories.length ? inbox.stories.map(inboxStory).join("") :
+        empty(inbox.task_count ? t("今天还没有可汇总的进展。有新记录或事件后会显示在这里。") : t("创建关注任务后，今天的进展会汇总到这里。"),
+          inbox.task_count ? "" : `<a class="button primary" href="#overview">${t("前往 Agent 工作台")}</a>`)}
+    </section>
+    ${inboxSourceHealth(inbox)}
+  </div>`;
+}
+
+function inboxStory(story) {
+  const top = story.priority || story.focus.length;
+  return `<details class="card inbox-story ${top ? "inbox-priority" : ""}">
+    <summary class="inbox-story-heading">
+      <div class="row inbox-story-meta">
+        ${story.priority ? pill(t("规则触发"), "a") : ""}
+        ${memoryMatch({memory_hits: story.focus})}
+        <time class="meta" datetime="${escape(story.at)}">${stamp(story.at)}</time>
+      </div>
+      <span class="inbox-story-title">${escape(story.title)}${icon("chevron")}</span>
+      ${story.summary ? `<span class="inbox-summary-copy">${escape(story.summary)}</span>` : ""}
+      <span class="meta">${story.reports.length
+        ? t("{count} 篇报道 · {sources} 个来源", {count: story.reports.length, sources: story.sources})
+        : t("事件更新")}</span>
+    </summary>
+    <div class="inbox-story-body">
+      ${story.reports.length ? `<h3>${t("报道与原文")}</h3><ul class="inbox-reports">${story.reports.map(inboxReport).join("")}</ul>` : ""}
+      ${story.events.length ? `<div class="inbox-links"><span class="meta">${t("关联事件")}</span>
+        ${story.events.map(event => `<a href="${hrefFor(event.task_id, "event", event.id)}">${escape(event.label)}</a>
+          ${statusPill(statuses[event.status] || statuses.open)}`).join("")}</div>` : ""}
+      <div class="inbox-links"><span class="meta">${t("关联任务")}</span>
+        ${story.tasks.map(task => `<a href="${hrefFor(task.id)}">${escape(task.title)}</a>`).join("")}</div>
+    </div>
+  </details>`;
+}
+
+function inboxReport(report) {
+  const link = safeURL(report.url);
+  return `<li><div><strong>${escape(report.title || report.source)}</strong>
+      <p class="meta">${escape(sourceName(report.source))} · ${report.published_missing ? t("首次发现") + " " : ""}
+        <time datetime="${escape(report.published_at)}">${stamp(report.published_at)}</time></p></div>
+    ${link ? `<a class="button inbox-original" href="${escape(link)}" target="_blank" rel="noopener noreferrer">${t("查看原文")} ${icon("diagonal")}</a>`
+      : button(t("查看完整记录"), "evidence", false, `data-task="${escape(report.task_id)}" data-evidence="${escape(report.id)}"`)}
+  </li>`;
+}
+
+function inboxSourceHealth(inbox) {
+  const status = inbox.sources_checked ? t("今日检查未发现来源读取失败。") : t("今天还没有正式的来源检查记录。");
+  return `<aside class="card inbox-health"><div class="row inbox-health-title"><span class="scene-icon">${icon("signal")}</span>
+    <h2>${t("来源状态")}</h2></div>
+    ${inbox.failures.length ? `<ul class="inbox-failures">${inbox.failures.map(source => `<li>
+      <div class="row spread"><strong>${escape(sourceName(source.source))}</strong>
+        ${source.recovered_at ? pill(t("已恢复"), "g") : pill(t("读取失败"), "r")}</div>
+      <p class="meta">${escape(source.task.title)} · ${escape(source.note)}</p>
+      <p class="meta">${t("失败时间")} ${stamp(source.at)}
+        ${source.recovered_at ? ` · ${t("恢复时间")} ${stamp(source.recovered_at)}` : ""}</p>
+      <a href="${hrefFor(source.task.id, "runs", source.run_id)}">${t("查看运行记录")}</a>
+    </li>`).join("")}</ul>` : `<p class="meta inbox-health-empty">${status}</p>`}
+  </aside>`;
 }
 
 function eventRow(event) {
@@ -720,7 +804,8 @@ function sourcesTab(task, evidence) {
   const base = `<div class="card event-panel section-block"><div class="row spread"><h2>${t("数据来源")}</h2>${button(t("＋ 导入证据"), "import", true)}</div>
     <p class="meta">${t("CSV 或 JSON。媒体文字稿和视频字幕可以按文本导入。")}</p>
     <div class="row topic-chips">${task.plan.feeds.map(id => pill(sourceName(state.meta.feeds.find(feed => feed.id === id)?.name || id), "g")).join("")}
-      ${task.plan.news_query ? pill(t("公开新闻") + " · " + task.plan.news_query, "g") : ""}
+      ${task.plan.news_query ? (task.plan.news_providers || ["google"]).map(provider =>
+        pill(t(newsProviderNames[provider]) + " · " + task.plan.news_query, "g")).join("") : ""}
       ${task.plan.feeds.length || task.plan.news_query ? "" : pill(t("未启用 RSS"))}
       <a href="${hrefFor(task.id, "rules")}">${t("配置 RSS")}</a></div></div>`;
   if (!evidence) return base;
@@ -779,8 +864,29 @@ function topicForm(topic = {}) {
     </div><div class="form-actions">${button(t("删除主题"), "remove-topic")}</div></fieldset>`;
 }
 
+function feedOptions(selected) {
+  const labels = {
+    f1: "F1 赛车", sports: "体育", tech: "科技与 AI", research: "科研", finance: "财经",
+    news: "中文新闻", versions: "版本发布", custom: "自定义订阅",
+  };
+  const groups = new Map();
+  for (const feed of state.meta.feeds) {
+    const label = labels[feed.group] || labels.custom;
+    if (!groups.has(label)) groups.set(label, []);
+    groups.get(label).push(feed);
+  }
+  if (!groups.size) return `<p class="help">${t("当前没有配置 RSS。")}</p>`;
+  return `<div class="feed-options">${[...groups.entries()].map(([label, feeds]) => {
+    const count = feeds.filter(feed => selected.includes(feed.id)).length;
+    return `<details ${count ? "open" : ""}><summary>${t(label)} <span class="meta feed-count">${count} / ${feeds.length}</span></summary>
+      <div class="row">${feeds.map(feed => `<label class="checkbox"><input type="checkbox" name="feed" value="${escape(feed.id)}"
+        ${selected.includes(feed.id) ? "checked" : ""}>${escape(sourceName(feed.name))}</label>`).join("")}</div></details>`;
+  }).join("")}</div>`;
+}
+
 function ruleForm(plan, title, submit, type, intent = "", note = "") {
   const draft = type === "create";
+  const providers = plan.news_providers || ["google"];
   const html = `<form data-form="${type}" data-scenario="${escape(plan.scenario)}" data-origin="${escape(plan.generatedBy)}" data-locale="${escape(plan.locale || "zh-CN")}">
     ${draft ? `<input name="intent" type="hidden" value="${escape(intent)}"><div class="plan-preview">${planPreview(plan)}</div>`
       : `<div class="section-heading"><h2>${title}</h2></div>`}
@@ -795,13 +901,14 @@ function ruleForm(plan, title, submit, type, intent = "", note = "") {
       ${input("hours", t("观察窗口（小时）"), plan.hours, 'type="number" min="1" max="2160" required')}
       ${input("cadence", t("检查间隔（分钟）"), plan.cadence, 'type="number" min="5" max="10080" required')}
     </div>
-    <fieldset><legend>${t("RSS / Atom 来源")}</legend><div class="row">
-      ${state.meta.feeds.map(feed => `<label class="checkbox"><input type="checkbox" name="feed" value="${escape(feed.id)}"
-        ${plan.feeds.includes(feed.id) ? "checked" : ""}>${escape(sourceName(feed.name))}</label>`).join("") || `<p class="help">${t("当前没有配置 RSS。")}</p>`}
-    </div><p class="help">${t("每个任务也可独立导入自有证据。")}</p></fieldset>
-    ${plan.news_query || (draft && state.agent.preview) ? `
+    <fieldset><legend>${t("RSS / Atom 来源")}</legend>${feedOptions(plan.feeds)}</fieldset>
+    <fieldset><legend>${t("公开新闻搜索")}</legend>
       ${input("news_query", t("补充公开新闻搜索词（选填）"), plan.news_query || "", 'maxlength="120"', true)}
-      <p class="help">${t("填写后会使用 Google 新闻 RSS 定期查询该词。")}</p>` : ""}
+      <div class="row search-provider-options">${Object.entries(newsProviderNames).map(([id, name]) =>
+        `<label class="checkbox"><input type="checkbox" name="news_provider" value="${id}"
+          ${providers.includes(id) ? "checked" : ""}>${t(name)}</label>`).join("")}</div>
+      <p class="help">${t("填写搜索词后，定期读取所选渠道的新闻。")}</p>
+    </fieldset>
     <div class="topics">${plan.topics.map(topicForm).join("")}</div>
     ${button(t("＋ 添加主题"), "append-topic")}
     ${draft ? "</div></details>" : ""}
@@ -825,6 +932,7 @@ function makePlan(form) {
     hours: Number(data.get("hours")), cadence: Number(data.get("cadence")),
     feeds: data.getAll("feed"),
     news_query: data.get("news_query") || "",
+    news_providers: data.getAll("news_provider"),
     topics: [...form.querySelectorAll(".topic")].map(item => ({
       label: item.querySelector('[name="label"]').value, terms: split(item.querySelector('[name="terms"]').value),
       owner: item.querySelector('[name="owner"]').value, action: item.querySelector('[name="action"]').value,
@@ -1042,6 +1150,13 @@ document.addEventListener("change", async event => {
   if (event.target.name === "useModel" && event.target.form?.dataset.form === "propose") {
     composerDraft().useModel = event.target.checked;
   }
+  if (event.target.name === "feed") {
+    const group = event.target.closest(".feed-options details");
+    if (group) {
+      const feeds = [...group.querySelectorAll('input[name="feed"]')];
+      group.querySelector(".feed-count").textContent = `${feeds.filter(feed => feed.checked).length} / ${feeds.length}`;
+    }
+  }
   syncDraft(event.target.form);
 });
 
@@ -1125,6 +1240,11 @@ document.addEventListener("click", async event => {
   }
   if (action === "trial" || action === "live") openRun(action);
   if (action === "import") openImport();
+  if (action === "refresh-inbox") {
+    element.disabled = true;
+    await refresh();
+    return;
+  }
   if (["memory-draft", "memory-edit", "memory-remove"].includes(action)) await openMemoryAction(element);
   if (action === "event-status") {
     const [label] = statuses[element.dataset.status];
@@ -1142,7 +1262,7 @@ document.addEventListener("click", async event => {
         await refresh();
         toast(next ? t("已启用，后台会自动检查。也可以立即检查。") : t("已暂停自动检查。"));
       } else {
-        const item = await api(apiTask(task.id) + "/evidence/" + encodeURIComponent(element.dataset.evidence));
+        const item = await api(apiTask(element.dataset.task || task.id) + "/evidence/" + encodeURIComponent(element.dataset.evidence));
         viewDialog(t("原始证据"), evidenceBlock(item, false));
       }
     } catch (error) { toast(error.message); }

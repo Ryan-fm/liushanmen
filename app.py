@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 from intel.demo import seed
 from intel.engine import Engine
 from intel.i18n import copy, error_text, locale
+from intel.inbox import build_inbox
 from intel.memory import draft_from_memory
 from intel.news import NewsDiscovery, subject_from
 from intel.rules import InputError, integer, propose, string, validate
@@ -91,8 +92,11 @@ class Application:
 
     def handle(self, method, path, body, *, lang="zh-CN"):
         db = self.database
+        if method == "GET" and path == ["inbox"]:
+            return build_inbox(db, self.feeds, lang)
         if method == "GET" and path == ["meta"]:
-            return {"feeds": [{"id": key, "name": value["name"]} for key, value in self.feeds.items()],
+            return {"feeds": [{"id": key, "name": value["name"], "group": value.get("group", "custom")}
+                              for key, value in self.feeds.items()],
                     "modelConfigured": model_configured(),
                     "backgroundModel": model_configured() and os.environ.get("LSM_BACKGROUND_MODEL") == "1"}
         if method == "POST" and path == ["propose"]:
@@ -143,8 +147,10 @@ class Application:
             return next((value for value in db.records(task_id) if value["id"] == tail[1]), None)
         if method == "POST" and tail == ["rules"]:
             raw_plan = body.get("plan")
-            if isinstance(raw_plan, dict) and "locale" not in raw_plan:
-                raw_plan = {**raw_plan, "locale": db.task(task_id)["plan"].get("locale")}
+            if isinstance(raw_plan, dict) and ("locale" not in raw_plan or "news_providers" not in raw_plan):
+                previous = db.task(task_id)["plan"]
+                raw_plan = {"locale": previous.get("locale"), "news_providers": previous.get("news_providers", ["google"]),
+                            **raw_plan}
             plan = validate(raw_plan, self.feeds)
             revision = integer(body["revision"], "规则版本", 1, 2**31 - 1) if "revision" in body else None
             db.update_plan(task_id, plan, revision=revision)

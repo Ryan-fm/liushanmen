@@ -6,6 +6,8 @@ from urllib.request import Request, urlopen
 
 from .i18n import copy, locale
 
+NEWS_PROVIDERS = ("google", "bing")
+
 SCENARIOS = {
     "sports": {
         "title": "赛事现场研判",
@@ -154,6 +156,12 @@ def validate(plan, available_feeds):
     feeds = strings(plan.get("feeds", []), "RSS 数据源", 12)
     if set(feeds) - set(available_feeds):
         raise InputError("方案包含未配置的 RSS 数据源")
+    news_query = string(plan.get("news_query", ""), "公开新闻搜索词", 120)
+    news_providers = strings(plan.get("news_providers", ["google"]), "公开搜索渠道", len(NEWS_PROVIDERS))
+    if set(news_providers) - set(NEWS_PROVIDERS):
+        raise InputError("公开新闻搜索渠道不正确。")
+    if news_query and not news_providers:
+        raise InputError("请至少选择一个公开新闻搜索渠道。")
     scenario = plan.get("scenario", "general")
     if scenario not in (*SCENARIOS.keys(), "general"):
         scenario = "general"
@@ -169,7 +177,8 @@ def validate(plan, available_feeds):
         "hours": integer(plan.get("hours", 48), "回看小时数", 1, 2160),
         "cadence": integer(plan.get("cadence", 60), "检查间隔（分钟）", 5, 10080),
         "feeds": feeds,
-        "news_query": string(plan.get("news_query", ""), "公开新闻搜索词", 120),
+        "news_query": news_query,
+        "news_providers": news_providers,
         "generatedBy": "model" if plan.get("generatedBy") == "model" else "local",
     }
 

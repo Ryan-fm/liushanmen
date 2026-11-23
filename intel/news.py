@@ -6,11 +6,25 @@ from uuid import uuid4
 
 from .i18n import copy
 from .memory import focus_from_memory, phrase_pattern, rank_by_memory, searchable_text
-from .rules import MINIMUM, OWNER, TIME_WINDOW, InputError, validate
+from .rules import MINIMUM, NEWS_PROVIDERS, OWNER, TIME_WINDOW, InputError, validate
 from .sources import collect_sources, configured_sources, date, iso, normalize_text, now
 
 F1 = re.compile(r"(?<![a-z0-9])(?:f\s*1|formula\s*(?:one|1))(?![a-z0-9])|一级方程式", re.I)
 F1_ALIASES = ("F1", "Formula 1", "Formula One", "一级方程式")
+F1_FEEDS = ("f1-official", "f1-motorsport", "f1-bbc", "f1-espn", "f1-the-race", "f1-racefans")
+TOPIC_FEEDS = {
+    ("NBA", "美职篮", "美職籃"): ("nba-espn",),
+    ("足球", "Soccer", "Association football"): ("football-bbc", "football-espn"),
+    ("体育", "體育", "Sports"): ("rthk-sports",),
+    ("OpenAI",): ("openai",),
+    ("Hugging Face", "HuggingFace"): ("huggingface",),
+    ("NASA", "美国宇航局", "美國太空總署"): ("nasa",),
+    ("美联储", "美聯儲", "Federal Reserve", "The Federal Reserve", "The Fed"): ("federal-reserve",),
+    ("大中华", "大中華", "Greater China"): ("rthk-china",),
+    ("财经", "財經", "Finance"): ("rthk-finance",),
+}
+TOPIC_LOOKUP = {normalize_text(alias): (aliases, keys)
+                for aliases, keys in TOPIC_FEEDS.items() for alias in aliases}
 NEWS = re.compile(r"新闻|资讯|报道|赛况|头条|公开动态|比赛结果|赛果")
 NEWS_EN = re.compile(r"\b(?:news|headlines|press coverage|race reports?|race results?|public updates)\b", re.I)
 PRIVATE = re.compile(r"私域|内部|工单|客服|售后|退款|手机号|@|https?://|"
@@ -22,14 +36,14 @@ def subject_from(intent):
     if not (chinese or english) or PRIVATE.search(intent):
         return None
     if F1.search(intent):
-        return "F1", '"Formula 1"', ("f1-official", "f1-motorsport")
+        return "F1", '"Formula 1"', F1_FEEDS
     quoted = re.search(r'[「“《"]([^」”》"]{2,60})[」”》"]', intent)
     if quoted:
         subject = quoted[1]
     elif chinese:
         prefix = intent[:chinese.start()]
         subject = re.split(r"[，。；！？\n]", prefix)[-1].strip()
-        subject = re.sub(r"^(?:(?:我想|请你|请|先|帮我|给我|查一下|查找|搜索|看看|看一下|监测|跟踪|关注|了解|关于|近期|最新|最近的?)\s*)+", "", subject)
+        subject = re.sub(r"^(?:(?:我想|请你|请|先|帮我|给我|查一下|查找|查|搜索|看看|看一下|看|监测|跟踪|关注|了解|关于|近期|最新|最近的?)\s*)+", "", subject)
         subject = re.sub(r"(?:\s|的|相关|最新|比赛)+$", "", subject)
     else:
         after = re.match(r"\s+(?:about|on|for|regarding)\s+(.+)", intent[english.end():], re.I)
@@ -42,12 +56,18 @@ def subject_from(intent):
         subject = subject.strip(" .!?")
     if not 2 <= len(subject) <= 60 or not re.search(r"[\u3400-\u9fffA-Za-z]", subject):
         return None
-    return subject, subject, ()
+    return subject, subject, TOPIC_LOOKUP.get(normalize_text(subject), ((), ()))[1]
+
+
+def aliases_for(label):
+    if label == "F1":
+        return F1_ALIASES
+    return TOPIC_LOOKUP.get(normalize_text(label), ((label,), ()))[0]
 
 
 def task_matches_subject(task, label):
     plan = task["plan"]
-    aliases = F1_ALIASES if label == "F1" else (label,)
+    aliases = aliases_for(label)
     keys = {normalize_text(alias) for alias in aliases}
     targets = [*plan.get("entities", []), plan.get("news_query", "")]
     targets = [target for target in targets if target]
@@ -121,7 +141,7 @@ class NewsDiscovery:
         lang = draft.get("locale", "zh-CN")
         hours = draft["hours"] if TIME_WINDOW.search(intent) else 168
         keys = [key for key in direct if key in self.catalog]
-        query = "" if keys else search_term
+        query = "" if label == "F1" and keys else search_term
         notes = (note for task in self.database.tasks_with_memories()
                  if task_matches_subject(task, label) for note in task["notes"])
         focus = focus_from_memory(notes, lang)
@@ -133,7 +153,7 @@ class NewsDiscovery:
             on_progress("source_result", {**entry, "matched": len(found), "samples": samples})
 
         def search(feed_keys, search_query):
-            selected = configured_sources(self.catalog, feed_keys, search_query, hours)
+            selected = configured_sources(self.catalog, feed_keys, search_query, hours, NEWS_PROVIDERS)
             if on_progress is not None:
                 on_progress("checking_sources", {"hours": hours, "memory_focus": list(focus), "sources": [
                     {"id": key, "source": config["name"]} for key, config in selected.items()
@@ -145,7 +165,7 @@ class NewsDiscovery:
         items = preview_items(records, hours, nowish)
         with_results = {record["feed_id"] for record in items}
         working = [key for key in keys if key in with_results]
-        if keys and not items:
+        if keys and not query and not items:
             # Keep the failed source statuses visible; try broad search for this public subject.
             query = search_term
             fallback, fallback_logs = search([], query)
@@ -156,7 +176,7 @@ class NewsDiscovery:
         if on_progress is not None:
             on_progress("summarizing", {})
 
-        aliases = list(F1_ALIASES) if label == "F1" else [label]
+        aliases = list(aliases_for(label))
         explicit_minimum = bool(re.search(r"至少\s*\d+\s*条|\bat least\s+\d+", intent, re.I) and MINIMUM.search(intent))
         title_suffix = copy(lang, " 新闻跟踪", " News Monitoring")
         topic_suffix = copy(lang, " 新闻", " News")
@@ -170,7 +190,8 @@ class NewsDiscovery:
                                "Open the original reporting and check how the new developments relate to tracked events."),
             }],
             "minimum": draft["minimum"] if explicit_minimum else 1, "channels": 1, "hours": hours,
-            "cadence": 60, "feeds": working or ([] if query else keys), "news_query": query, "generatedBy": "local",
+            "cadence": 60, "feeds": working or ([] if query else keys), "news_query": query,
+            "news_providers": list(NEWS_PROVIDERS), "generatedBy": "local",
         }, self.catalog)
         key = uuid4().hex
         with self._lock:
@@ -193,7 +214,8 @@ class NewsDiscovery:
             if entry.get("task_id"):
                 return self.database.detail(entry["task_id"])
             plan = validate(raw_plan, self.catalog)
-            selected = configured_sources(self.catalog, plan["feeds"], plan["news_query"], plan["hours"])
+            selected = configured_sources(self.catalog, plan["feeds"], plan["news_query"], plan["hours"],
+                                          plan["news_providers"])
             if not selected:
                 raise InputError("请至少选择一个数据来源或填写公开新闻搜索词")
             with self.database.connect() as conn:

@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.utils import parsedate_to_datetime
 from hashlib import sha256
 from html.parser import HTMLParser
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import json
@@ -19,12 +19,42 @@ UTC = timezone.utc
 CST = timezone(timedelta(hours=8))
 KINDS = {"internal": "客户自有资料", "public": "公开资料", "media": "媒体文字稿"}
 BUILTIN_FEEDS = {
-    "python": {"name": "Python 发布记录", "url": "https://github.com/python/cpython/releases.atom"},
-    "bettafish": {"name": "BettaFish 发布记录", "url": "https://github.com/666ghj/BettaFish/releases.atom"},
     "f1-official": {"name": "Formula 1 官方", "url": "https://www.formula1.com/en/latest/all.xml",
-                    "entry_host": "www.formula1.com", "entry_prefix": "/en/latest/article/", "entity": "F1"},
+                    "entry_host": "www.formula1.com", "entry_prefix": "/en/latest/article/", "entity": "F1", "group": "f1"},
     "f1-motorsport": {"name": "Motorsport.com", "url": "https://www.motorsport.com/rss/f1/news/",
-                      "entry_host": "www.motorsport.com", "entry_prefix": "/f1/news/", "entity": "F1"},
+                      "entry_host": "www.motorsport.com", "entry_prefix": "/f1/news/", "entity": "F1", "group": "f1"},
+    "f1-autosport": {"name": "Autosport · F1", "url": "https://www.autosport.com/rss/f1/news/",
+                     "entry_host": "www.autosport.com", "entry_prefix": "/f1/news/", "entity": "F1", "group": "f1"},
+    "f1-bbc": {"name": "BBC Sport · F1", "url": "https://feeds.bbci.co.uk/sport/formula1/rss.xml",
+               "entry_host": "www.bbc.co.uk", "entry_prefix": "/sport/formula1/", "entity": "F1", "group": "f1"},
+    "f1-espn": {"name": "ESPN · F1", "url": "https://www.espn.com/espn/rss/f1/news",
+                "entity": "F1", "group": "f1"},
+    "f1-racefans": {"name": "RaceFans · F1", "url": "https://www.racefans.net/category/formula-1/feed/",
+                    "entry_host": "www.racefans.net", "entry_prefix": "/", "entity": "F1", "group": "f1"},
+    "f1-the-race": {"name": "The Race · F1", "url": "https://www.the-race.com/rss/",
+                    "entry_host": "www.the-race.com", "entry_prefix": "/formula-1/", "entity": "F1", "group": "f1"},
+    "nba-espn": {"name": "ESPN · NBA", "url": "https://www.espn.com/espn/rss/nba/news", "entity": "NBA", "group": "sports"},
+    "football-bbc": {"name": "BBC Sport · 足球", "url": "https://feeds.bbci.co.uk/sport/football/rss.xml",
+                     "entity": "足球", "group": "sports"},
+    "football-espn": {"name": "ESPN · 足球", "url": "https://www.espn.com/espn/rss/soccer/news",
+                      "entity": "足球", "group": "sports"},
+    "openai": {"name": "OpenAI 官方", "url": "https://openai.com/news/rss.xml", "entity": "OpenAI", "group": "tech"},
+    "huggingface": {"name": "Hugging Face 博客", "url": "https://huggingface.co/blog/feed.xml",
+                    "entity": "Hugging Face", "group": "tech"},
+    "bbc-technology": {"name": "BBC 科技", "url": "https://feeds.bbci.co.uk/news/technology/rss.xml", "group": "tech"},
+    "techcrunch": {"name": "TechCrunch", "url": "https://techcrunch.com/feed/", "group": "tech"},
+    "federal-reserve": {"name": "美联储公告", "url": "https://www.federalreserve.gov/feeds/press_all.xml",
+                        "entity": "美联储", "group": "finance"},
+    "rthk-finance": {"name": "香港电台 · 财经", "url": "https://rthk9.rthk.hk/rthk/news/rss/c_expressnews_cfinance.xml",
+                     "entity": "财经", "group": "finance"},
+    "rthk-sports": {"name": "香港电台 · 体育", "url": "https://rthk9.rthk.hk/rthk/news/rss/c_expressnews_csport.xml",
+                    "entity": "体育", "group": "sports"},
+    "rthk-china": {"name": "香港电台 · 大中华", "url": "https://rthk9.rthk.hk/rthk/news/rss/c_expressnews_greaterchina.xml",
+                   "entity": "大中华", "group": "news"},
+    "arxiv-ai": {"name": "arXiv · AI 预印本", "url": "https://rss.arxiv.org/rss/cs.AI", "group": "research"},
+    "nasa": {"name": "NASA 官方", "url": "https://www.nasa.gov/feed/", "entity": "NASA", "group": "research"},
+    "python": {"name": "Python 发布记录", "url": "https://github.com/python/cpython/releases.atom", "group": "versions"},
+    "bettafish": {"name": "BettaFish 发布记录", "url": "https://github.com/666ghj/BettaFish/releases.atom", "group": "versions"},
 }
 
 
@@ -74,7 +104,7 @@ def feeds():
         link = config.get("url", "")
         if not web_url(link) or not link.startswith("https://"):
             raise ValueError("RSS 配置必须是 HTTPS")
-        result[key] = {"url": link, "name": string(config.get("name", key), "数据源名称", 100, True)}
+        result[key] = {"url": link, "name": string(config.get("name", key), "数据源名称", 100, True), "group": "custom"}
     return result
 
 
@@ -131,9 +161,10 @@ def get_feed(config):
     if re.search(br"<!\s*(DOCTYPE|ENTITY)\b", payload, re.I):
         raise InputError("RSS 包含不支持的 XML 声明")
     root = ET.fromstring(payload)
-    entries = root.findall(".//item") or root.findall(".//{*}entry")
+    entries = root.findall(".//{*}item") or root.findall(".//{*}entry")
     observed = now()
     records = []
+    provider = config.get("news_provider", "")
     for entry in entries[:100]:
         def field(*keys):
             for key in keys:
@@ -156,6 +187,10 @@ def get_feed(config):
             link = next((elem.get("href", "") for elem in entry.findall("{*}link")
                          if elem.get("rel", "alternate") == "alternate"), "")
         link = web_url(link)
+        if provider == "bing" and link:
+            parsed = urlsplit(link)
+            if parsed.hostname == "www.bing.com" and parsed.path.casefold() == "/news/apiclick.aspx":
+                link = web_url(parse_qs(parsed.query).get("url", [""])[0])
         if host := config.get("entry_host"):
             parsed = urlsplit(link)
             if parsed.hostname != host or not parsed.path.startswith(config["entry_prefix"]):
@@ -163,8 +198,8 @@ def get_feed(config):
             link = parsed._replace(query="", fragment="").geturl()
         published = field("published", "pubDate", "updated", "date")
         external = field("guid", "id") or link or sha256(body.encode()).hexdigest()
-        source = field("source")[:100] if config.get("news_search") else ""
-        if source and title.endswith(" - " + source):
+        source = field("source", "Source")[:100] if provider else ""
+        if provider == "google" and source and title.endswith(" - " + source):
             title = title.removesuffix(" - " + source)
             body = title
             summary = ""
@@ -176,20 +211,28 @@ def get_feed(config):
         except InputError:
             continue
         records.append({**record, "summary": summary[:380], "published_missing": not published,
-                        "via_news_search": bool(config.get("news_search"))})
+                        "via_news_search": provider == "google", "news_provider": provider})
     return records
 
 
-def configured_sources(catalog, keys, query="", hours=168):
+def configured_sources(catalog, keys, query="", hours=168, search_providers=None):
     selected = {key: catalog.get(key) for key in keys}
-    if query:
-        language = {"hl": "zh-Hant", "gl": "HK", "ceid": "HK:zh-Hant"} if re.search(r"[\u3400-\u9fff]", query) else {
+    if not query:
+        return selected
+    providers = ("google",) if search_providers is None else search_providers
+    query_id = sha256(query.encode()).hexdigest()[:16]
+    chinese = bool(re.search(r"[\u3400-\u9fff]", query))
+    if "google" in providers:
+        language = {"hl": "zh-Hant", "gl": "HK", "ceid": "HK:zh-Hant"} if chinese else {
             "hl": "en-US", "gl": "US", "ceid": "US:en"
         }
         options = {**language, "q": f"{query} when:{max(1, (hours + 23) // 24)}d"}
-        key = "news-" + sha256(query.encode()).hexdigest()[:16]
-        selected[key] = {"name": f"Google 新闻 · {query}", "news_search": True,
-                         "url": "https://news.google.com/rss/search?" + urlencode(options)}
+        selected["news-" + query_id] = {"name": f"Google 新闻 · {query}", "news_provider": "google",
+                                       "url": "https://news.google.com/rss/search?" + urlencode(options)}
+    if "bing" in providers:
+        options = {"q": query, "format": "rss", "mkt": "zh-HK" if chinese else "en-US"}
+        selected["bing-news-" + query_id] = {"name": f"Bing 新闻 · {query}", "news_provider": "bing",
+                                           "url": "https://www.bing.com/news/search?" + urlencode(options)}
     return selected
 
 

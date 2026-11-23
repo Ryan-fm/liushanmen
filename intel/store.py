@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from .i18n import copy
 from .rules import InputError
-from .sources import iso, now
+from .sources import date, iso, now
 
 
 def pack(value):
@@ -208,6 +208,39 @@ class Database:
         with self.connect() as connection:
             rows = connection.execute("SELECT data FROM evidence WHERE task_id=?", (key,)).fetchall()
         return [json.loads(row["data"]) for row in rows]
+
+    def inbox_snapshot(self, start, end):
+        with self.connect() as connection:
+            connection.execute("BEGIN")
+            tasks = {row["id"]: {**self.task_row(row), "records": [], "notes": [], "events": [], "checks": []}
+                     for row in connection.execute("SELECT * FROM tasks WHERE demo=0")}
+            if not tasks:
+                return []
+            for row in connection.execute(
+                "SELECT e.task_id,e.data FROM evidence e JOIN tasks t ON t.id=e.task_id WHERE t.demo=0"
+            ):
+                record = json.loads(row["data"])
+                if start <= date(record["published_at"]) <= end:
+                    tasks[row["task_id"]]["records"].append(record)
+            for row in connection.execute(
+                "SELECT m.task_id,m.text FROM task_memory m JOIN tasks t ON t.id=m.task_id WHERE t.demo=0 "
+                "ORDER BY m.updated_at DESC,m.rowid DESC"
+            ):
+                tasks[row["task_id"]]["notes"].append({"text": row["text"]})
+            for row in connection.execute(
+                "SELECT e.* FROM events e JOIN tasks t ON t.id=e.task_id WHERE t.demo=0 AND e.updated_at BETWEEN ? AND ?",
+                (iso(start), iso(end))
+            ):
+                tasks[row["task_id"]]["events"].append(self.event_row(row))
+            for row in connection.execute(
+                "SELECT r.task_id,r.id,r.created_at,r.result FROM runs r JOIN tasks t ON t.id=r.task_id "
+                "WHERE t.demo=0 AND r.mode='live' AND r.created_at BETWEEN ? AND ? ORDER BY r.created_at,r.rowid",
+                (iso(start), iso(end))
+            ):
+                tasks[row["task_id"]]["checks"].append({
+                    "id": row["id"], "at": row["created_at"], "sources": json.loads(row["result"]).get("sources", []),
+                })
+        return list(tasks.values())
 
     @staticmethod
     def event_row(row):
