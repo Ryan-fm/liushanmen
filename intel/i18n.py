@@ -33,6 +33,9 @@ ERRORS = {
     "找不到任务": "Task not found.",
     "找不到该事件": "Event not found.",
     "规则已更新，请按新规则重新运行": "The rules changed during the run. Run again using the updated rules.",
+    "规则已更新，请重新生成记忆草案。": "The rules have changed. Draft again from the saved note.",
+    "找不到这条记忆。": "This memory note could not be found.",
+    "这条记忆没有可用的关注词。可以写成「关注：安全车、车手变动」。": "This note did not yield keywords. Try “Focus on: safety car, driver changes”.",
     "任务已暂停，本次未更新事件": "The task was paused. Its events were left as they were.",
     "请先查看一轮新闻预览": "Preview the news before enabling monitoring.",
     "新闻预览已过期，请重新查询后确认": "This preview expired. Search again before enabling monitoring.",
@@ -47,6 +50,7 @@ ERRORS = {
     "kind 只接受 internal、public 或 media": "The kind field must be internal, public, or media.",
 }
 FIELDS = {
+    "记忆内容": "Memory note", "规则版本": "Rule version",
     "监测需求": "Monitoring request", "原始需求": "Original request", "来源名称": "Source name",
     "处理备注": "Progress note", "主题名称": "Topic name", "关键词": "Keywords",
     "建议负责人": "Suggested owner", "核查动作": "Review action", "RSS 数据源": "RSS sources",

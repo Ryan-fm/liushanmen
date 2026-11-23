@@ -20,6 +20,7 @@ Open the [local workspace](http://127.0.0.1:8765/) and try “Track the latest F
 
 - **Live search** shows sources, headlines, and article links from RSS / Atom feeds and Google News.
 - **Custom monitoring** lets you set keywords, thresholds, and check intervals. Review the preview and confirm to start scheduled checks.
+- **Task charts and memory** show check history and evidence sources. Save ideas and draft rule changes for review.
 - **Event review** supports CSV / JSON imports, trial runs, evidence review, and Markdown briefings.
 
 ## Architecture

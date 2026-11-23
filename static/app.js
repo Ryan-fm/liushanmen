@@ -21,7 +21,8 @@ const freshAgent = (intent = "", useModel = false) => ({
   ...freshDraft(intent, useModel), proposal: null, preview: null, viewOnly: false, note: "", loading: false,
   sources: new Map(), searchHours: 0, summarizing: false, controller: null,
 });
-const state = { meta: { feeds: [] }, task: null, sequence: 0, agent: freshAgent(), homeDraft: freshDraft() };
+const state = { meta: { feeds: [] }, task: null, memories: [], memoryDrafts: new Map(),
+  sequence: 0, agent: freshAgent(), homeDraft: freshDraft() };
 let focusComposerOnLoad = false;
 let toastTimer;
 
@@ -61,6 +62,8 @@ const ICON_PATHS = {
   signal: '<path d="M2 12h4l3-6 4 12 3-6h6"/>',
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 8v4l2.5 1.5"/>',
   search: '<circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 4 4"/>',
+  memory: '<rect x="5" y="4" width="14" height="16" rx="2"/><path d="M9 8h6m-6 4h6m-6 4h3"/>',
+  inbox: '<path d="M4 5h16v13H4zM4 13h4l2 2h4l2-2h4"/>',
   check: '<path d="m5 12 4 4L19 6"/>',
   chevron: '<path d="m6 9 6 6 6-6"/>',
 };
@@ -138,7 +141,8 @@ function parseRoute() {
   const parts = location.hash.slice(1).split("/");
   if (!parts[0] || parts[0] === "home") return { name: "home" };
   if (parts[0] === "task" && /^[a-f0-9]{12}$/.test(parts[1] || "")) {
-    return { name: "task", id: parts[1], tab: parts[2] || "summary", extra: parts[3] || "" };
+    const tab = ["rules", "sources", "runs", "event"].includes(parts[2]) ? parts[2] : "summary";
+    return { name: "task", id: parts[1], tab, extra: parts[3] || "" };
   }
   return { name: parts[0] === "events" ? "events" : "overview" };
 }
@@ -162,15 +166,18 @@ async function refresh({ focus = false, editedRules = null } = {}) {
     closeMenu();
   }
   try {
-    const [{ tasks: allTasks }, task, evidence] = await Promise.all([
+    const [{ tasks: allTasks }, task, evidence, insights, memories] = await Promise.all([
       api("/api/tasks"),
       route.name === "task" ? api(apiTask(route.id)) : Promise.resolve(null),
       route.tab === "sources" ? api(apiTask(route.id) + "/evidence") : Promise.resolve(null),
+      route.tab === "summary" ? api(apiTask(route.id) + "/insights") : Promise.resolve(null),
+      route.tab === "summary" ? api(apiTask(route.id) + "/memory") : Promise.resolve({ notes: [] }),
     ]);
     if (sequence !== state.sequence) return;
     const userTasks = allTasks.filter(item => !item.demo);
     const tasks = userTasks.length ? userTasks : allTasks;
     state.task = task;
+    state.memories = memories.notes;
     let events = null;
     if (route.name === "events") {
       const details = await Promise.all(tasks.map(item => api(apiTask(item.id))));
@@ -182,7 +189,7 @@ async function refresh({ focus = false, editedRules = null } = {}) {
     if (route.name === "home") renderHome(userTasks);
     else if (route.name === "overview") renderOverview();
     else if (route.name === "events") renderEvents(events);
-    else renderTask(task, route, evidence, editedRules);
+    else renderTask(task, route, { evidence, editedRules, insights });
     if (route.name === "overview" && focusComposerOnLoad) {
       focusComposerOnLoad = false;
       document.querySelector("#agent-intent")?.focus();
@@ -509,7 +516,7 @@ function renderEvents(events) {
     ${section(t("已处理"), resolved.length ? resolved.map(eventRow).join("") : empty(t("暂无已处理事件。")), `<span class="meta">${t("{count} 件", {count: resolved.length})}</span>`)}`;
 }
 
-function renderTask(task, route, evidence, editedRules) {
+function renderTask(task, route, { evidence, editedRules, insights }) {
   const tab = route.tab;
   const activeTab = tab === "event" ? "summary" : tab;
   const tabs = { summary: t("研判概览"), rules: t("监测规则"), sources: t("证据库"), runs: t("运行记录") };
@@ -531,20 +538,29 @@ function renderTask(task, route, evidence, editedRules) {
   else if (tab === "event") {
     const event = task.events.find(item => item.id === route.extra);
     content = event ? eventDetail(event) : empty(t("找不到该事件。"), `<a class="button" href="${hrefFor(task.id)}">${t("返回任务")}</a>`);
-  } else content = summaryTab(task);
+  } else content = summaryTab(task, insights);
   page.innerHTML = title + tabbar + content;
 }
 
-function summaryTab(task) {
+function summaryTab(task, insights) {
   const last = task.runs[0];
+  const latestCheck = insights.checks.at(-1);
   const events = task.events.map(event => ({ ...event, task }));
-  return `<div class="detail-layout"><div>
+  return `<div class="overview-metrics" aria-label="${t("监测指标")}">
+    ${metric("inbox", t("累计证据"), insights.evidence_count)}
+    ${metric("signal", t("待处理事件"), events.filter(event => event.status !== "resolved").length)}
+    ${metric("clock", t("最近正式检查"), latestCheck ? stamp(latestCheck.at) : "—", "metric-time")}
+  </div>
+  <div class="overview-grid"><div class="overview-data">
+    ${checkChart(insights.checks)}
+    ${sourceChart(task, insights)}
     ${section(t("已归档的事件"), events.length ? events.map(eventRow).join("") : empty(
       t("试跑可以预览触发结果。启用方案并正式检查后，符合规则的主题会在这里形成事件。"),
       `<a class="button" href="${hrefFor(task.id, "sources")}">${t("查看或导入证据")}</a>`))}
     ${last ? section(t("最近运行"), runCard(last, false),
       `<a href="${hrefFor(task.id, "runs", last.id)}">${t("查看运行记录")}</a>`) : ""}
-    </div><aside class="card event-panel rules-panel"><div class="row rules-panel-title"><span class="scene-icon">${icon("signal")}</span><h3>${t("当前规则")}</h3></div>
+    </div><aside class="overview-side">${memoryPanel(task)}
+    <div class="card event-panel rules-panel"><div class="row rules-panel-title"><span class="scene-icon">${icon("signal")}</span><h3>${t("当前规则")}</h3></div>
       <p class="meta">${t("方案第 {revision} 版", {revision: task.revision})} · ${task.plan.generatedBy === "model" ? t("模型起草") : t("本地规则起草")}</p>
       <dl class="rule-facts">
         <div><dt>${t("观察窗口")}</dt><dd>${t("{hours} 小时", task.plan)}</dd></div>
@@ -554,7 +570,82 @@ function summaryTab(task) {
       </dl>
       <div class="row rule-links"><a href="${hrefFor(task.id, "rules")}">${t("修改规则")}</a>
         <a href="${apiTask(task.id)}/report?lang=${language()}" download>${t("导出情报简报")}</a></div>
-    </aside></div>`;
+    </div></aside></div>`;
+}
+
+function metric(symbol, label, value, extra = "") {
+  return `<div class="card overview-metric">
+    <span class="scene-icon">${icon(symbol)}</span>
+    <div><span class="meta">${label}</span><strong class="${extra}">${value}</strong></div>
+  </div>`;
+}
+
+function checkChart(checks) {
+  const title = t("检查趋势");
+  const header = `<div class="chart-title"><h2>${title}</h2><p class="meta">${t("最近正式检查的输入记录数")}</p></div>`;
+  if (!checks.length) return `<section class="card insight-chart">${header}<p class="chart-empty">${t("完成首次正式检查后，这里会显示记录数。")}</p></section>`;
+  const max = Math.max(1, ...checks.map(check => check.count));
+  const baseline = 110;
+  const yFor = count => baseline - (count / max) * 94;
+  const points = checks.map((check, index) => ({
+    ...check, x: checks.length === 1 ? 234 : 39 + index * 392 / (checks.length - 1), y: yFor(check.count),
+  }));
+  const path = points.map(point => `${point.x},${point.y}`).join(" ");
+  const ticks = [...new Set([max, Math.floor(max / 2), 0])];
+  const values = points.map(point => `<li><time datetime="${escape(point.at)}">${stamp(point.at)}</time><strong>${point.count}</strong></li>`).join("");
+  return `<section class="card insight-chart">${header}
+    <svg class="check-chart" viewBox="0 0 448 120" role="img" aria-label="${title}">
+      <defs><linearGradient id="check-chart-fill" x2="0" y2="1"><stop offset="0" stop-color="#8875ff" stop-opacity=".27"/>
+        <stop offset="1" stop-color="#8875ff" stop-opacity=".03"/></linearGradient></defs>
+      ${ticks.map(count => `<line x1="39" x2="431" y1="${yFor(count)}" y2="${yFor(count)}" />
+        <text x="30" y="${yFor(count) + 4}" text-anchor="end">${count}</text>`).join("")}
+      ${points.length > 1 ? `<polygon points="${points[0].x},${baseline} ${path} ${points.at(-1).x},${baseline}" fill="url(#check-chart-fill)"/>
+        <polyline points="${path}" fill="none" />` : ""}
+      ${points.map(point => `<circle cx="${point.x}" cy="${point.y}" r="4"><title>${stamp(point.at)} · ${point.count}</title></circle>`).join("")}
+    </svg>
+    <div class="chart-dates"><span>${stamp(points[0].at)}</span>${points.length > 1 ? `<span>${stamp(points.at(-1).at)}</span>` : ""}</div>
+    <details class="chart-values"><summary>${t("查看检查数值")}</summary><ul>${values}</ul></details>
+  </section>`;
+}
+
+function sourceChart(task, { sources, evidence_count: total }) {
+  const other = total - sources.reduce((sum, source) => sum + source.count, 0);
+  const groups = other ? [...sources, { name: t("其他来源"), count: other }] : sources;
+  return `<section class="card insight-chart">
+    <div class="chart-title row spread"><h2>${t("来源分布")}</h2><a href="${hrefFor(task.id, "sources")}">${t("证据库")}</a></div>
+    ${total ? `<p class="meta">${t("按已保存的证据记录统计")}</p><ul class="source-bars">
+      ${groups.map(source => `<li><div><span>${escape(sourceName(source.name))}</span><strong>${source.count}</strong></div>
+        <meter min="0" max="${total}" value="${source.count}" aria-label="${escape(sourceName(source.name))}"></meter></li>`).join("")}
+      </ul>` : `<p class="chart-empty">${t("暂无已保存的证据。采集或导入后会显示各来源的数量。")}</p>`}
+  </section>`;
+}
+
+function memoryPanel(task) {
+  const notes = state.memories;
+  const rows = notes.map(note => `<li class="memory-note">
+    <time class="meta" datetime="${escape(note.updated_at)}">${stamp(note.updated_at)}</time>
+    <p>${escape(note.text)}</p>
+    <div class="row memory-actions">
+      ${button(t("用这条记忆起草"), "memory-draft", false, `data-note="${escape(note.id)}"`)}
+      ${button(t("编辑"), "memory-edit", false, `data-note="${escape(note.id)}"`)}
+      ${button(t("删除"), "memory-remove", false, `data-note="${escape(note.id)}"`)}
+    </div>
+  </li>`);
+  return `<section class="card memory-panel">
+    <div class="row memory-panel-title"><span class="scene-icon">${icon("memory")}</span><h2>${t("Agent 记忆")}</h2>
+      ${notes.length ? pill(t("{count} 条记忆", {count: notes.length})) : ""}</div>
+    <p class="meta">${t("把想法和后续关注点留在这个任务里。")}</p>
+    <form data-form="memory-add">
+      <label class="sr-only" for="task-memory">${t("记下一个想法")}</label>
+      <textarea id="task-memory" name="text" required maxlength="2000" rows="3"
+        placeholder="${t("例如，关注：安全车、车手变动")}">${escape(state.memoryDrafts.get(task.id))}</textarea>
+      ${formError}<div class="form-actions"><button type="submit" class="button primary">${t("记下来")}</button></div>
+    </form>
+    ${rows.length ? `<ul class="memory-notes">${rows.slice(0, 3).join("")}</ul>` : ""}
+    ${rows.length > 3 ? `<details><summary>${t("查看其余 {count} 条记忆", {count: rows.length - 3})}</summary>
+      <ul class="memory-notes">${rows.slice(3).join("")}</ul></details>` : ""}
+    ${task.intent ? `<details class="memory-original"><summary>${t("原始需求")}</summary><p>${escape(task.intent)}</p></details>` : ""}
+  </section>`;
 }
 
 function evidenceBlock(item, detailButton = true) {
@@ -742,6 +833,36 @@ function openImport() {
   </form>`);
 }
 
+async function openMemoryAction(element) {
+  const note = state.memories.find(item => item.id === element.dataset.note);
+  if (!note) return;
+  const action = element.dataset.act;
+  const task = state.task;
+  if (action === "memory-edit") {
+    viewDialog(t("编辑记忆"), `<form data-form="memory-edit" data-note="${escape(note.id)}">
+      ${textArea("text", t("记忆内容"), note.text, 'required maxlength="2000"')}
+      ${formError}<div class="form-actions"><button type="submit" class="button primary">${t("保存")}</button></div></form>`);
+  } else if (action === "memory-remove") {
+    viewDialog(t("删除这条记忆？"), `<form data-form="memory-remove" data-note="${escape(note.id)}">
+      <p class="memory-quote">${escape(note.text)}</p>
+      ${formError}<div class="form-actions">${button(t("取消"), "close")}
+        <button type="submit" class="button primary">${t("删除")}</button></div></form>`);
+  } else {
+    element.disabled = true;
+    try {
+      const { plan, revision } = await api(apiTask(task.id) + "/memory/" + encodeURIComponent(note.id) + "/draft", {});
+      if (parseRoute().id !== task.id) return;
+      viewDialog(t("由记忆生成的规则草案"), ruleForm(plan, t("核对并编辑规则"), t("保存规则"), "update", task.intent,
+        t("已把这条记忆提炼成关注词。检查关键词后再保存规则。")));
+      dialog.querySelector('[data-form="update"]').dataset.revision = revision;
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      element.disabled = false;
+    }
+  }
+}
+
 function readRecords(content) {
   const text = content.replace(/^\uFEFF/, "").trim();
   if (!text) throw new Error(t("请选择文件或粘贴记录"));
@@ -803,9 +924,26 @@ async function submitForm(form) {
     await refresh();
     toast(message);
   } else if (action === "update") {
-    await api(apiTask(task.id) + "/rules", { plan: makePlan(form) });
+    const payload = { plan: makePlan(form) };
+    if (form.dataset.revision) payload.revision = Number(form.dataset.revision);
+    await api(apiTask(task.id) + "/rules", payload);
+    if (dialog.contains(form)) dialog.close();
     await refresh();
     toast(t("规则已保存。"));
+  } else if (["memory-add", "memory-edit", "memory-remove"].includes(action)) {
+    const path = apiTask(task.id) + "/memory";
+    const text = data.get("text");
+    if (action === "memory-add") {
+      await api(path, { text });
+      if (state.memoryDrafts.get(task.id) === text) state.memoryDrafts.delete(task.id);
+    } else {
+      const notePath = path + "/" + encodeURIComponent(form.dataset.note);
+      if (action === "memory-edit") await api(notePath, { text });
+      else await api(notePath + "/remove", {});
+      dialog.close();
+    }
+    if (parseRoute().id === task.id) await refresh();
+    toast(action === "memory-remove" ? t("记忆已删除。") : t("记忆已保存。"));
   } else if (action === "run") {
     const history = data.get("asOf");
     const run = await api(apiTask(task.id) + "/run", {
@@ -851,6 +989,9 @@ function composerDraft() {
 }
 
 document.addEventListener("input", event => {
+  if (event.target.id === "task-memory" && state.task) {
+    state.memoryDrafts.set(state.task.id, event.target.value);
+  }
   if (event.target.id === "agent-intent") {
     const draft = composerDraft();
     draft.intent = event.target.value;
@@ -963,6 +1104,7 @@ document.addEventListener("click", async event => {
   }
   if (action === "trial" || action === "live") openRun(action);
   if (action === "import") openImport();
+  if (["memory-draft", "memory-edit", "memory-remove"].includes(action)) await openMemoryAction(element);
   if (action === "event-status") {
     const [label] = statuses[element.dataset.status];
     viewDialog(t(label), `<form data-form="status" data-event="${escape(element.dataset.event)}" data-status="${escape(element.dataset.status)}">

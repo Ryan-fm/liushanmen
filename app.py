@@ -14,8 +14,9 @@ from urllib.parse import parse_qs, urlsplit
 from intel.demo import seed
 from intel.engine import Engine
 from intel.i18n import copy, error_text, locale
+from intel.memory import draft_from_memory
 from intel.news import NewsDiscovery, subject_from
-from intel.rules import InputError, propose, string, validate
+from intel.rules import InputError, integer, propose, string, validate
 from intel.sources import KINDS, feeds, iso, normalize, now
 from intel.store import Database, pack
 
@@ -115,6 +116,24 @@ class Application:
         tail = path[2:]
         if method == "GET" and not tail:
             return db.detail(task_id)
+        if method == "GET" and tail == ["insights"]:
+            return db.insights(task_id)
+        if tail == ["memory"]:
+            if method == "GET":
+                return {"notes": db.memories(task_id)}
+            if method == "POST":
+                return db.add_memory(task_id, string(body.get("text"), "记忆内容", 2000, True))
+        if method == "POST" and tail[:1] == ["memory"] and len(tail) >= 2:
+            note_id = tail[1]
+            if len(tail) == 2:
+                return db.update_memory(task_id, note_id, string(body.get("text"), "记忆内容", 2000, True))
+            if tail[2:] == ["remove"]:
+                db.remove_memory(task_id, note_id)
+                return {"removed": True}
+            if tail[2:] == ["draft"]:
+                task = db.task(task_id)
+                note = db.memory(task_id, note_id)
+                return {"plan": draft_from_memory(task["plan"], note["text"], self.feeds), "revision": task["revision"]}
         if method == "GET" and tail == ["evidence"]:
             db.task(task_id)
             items = sorted(db.records(task_id), key=lambda item: item["published_at"], reverse=True)
@@ -127,7 +146,8 @@ class Application:
             if isinstance(raw_plan, dict) and "locale" not in raw_plan:
                 raw_plan = {**raw_plan, "locale": db.task(task_id)["plan"].get("locale")}
             plan = validate(raw_plan, self.feeds)
-            db.update_plan(task_id, plan)
+            revision = integer(body["revision"], "规则版本", 1, 2**31 - 1) if "revision" in body else None
+            db.update_plan(task_id, plan, revision=revision)
             return db.detail(task_id)
         if method == "POST" and tail == ["active"]:
             active = body.get("active")

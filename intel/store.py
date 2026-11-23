@@ -1,4 +1,5 @@
 """SQLite storage for plans, source records, versioned events and run results."""
+from collections import Counter
 from contextlib import contextmanager
 from functools import partial
 import json
@@ -28,6 +29,11 @@ class Database:
                 CREATE TABLE IF NOT EXISTS evidence (
                     task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
                     id TEXT NOT NULL, data TEXT NOT NULL,
+                    PRIMARY KEY (task_id, id)
+                );
+                CREATE TABLE IF NOT EXISTS task_memory (
+                    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    id TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                     PRIMARY KEY (task_id, id)
                 );
                 CREATE TABLE IF NOT EXISTS runs (
@@ -85,14 +91,76 @@ class Database:
             """).fetchall()
         return [self.task_row(row) for row in data]
 
-    def update_plan(self, key, plan):
+    def update_plan(self, key, plan, *, revision=None):
         with self.connect() as connection:
             cursor = connection.execute(
-                "UPDATE tasks SET plan=?,revision=revision+1 WHERE id=?",
-                (pack(plan), key),
+                "UPDATE tasks SET plan=?,revision=revision+1 WHERE id=? AND (? IS NULL OR revision=?)",
+                (pack(plan), key, revision, revision),
             )
             if cursor.rowcount != 1:
+                if revision is not None and connection.execute("SELECT 1 FROM tasks WHERE id=?", (key,)).fetchone():
+                    raise InputError("规则已更新，请重新生成记忆草案。")
                 raise InputError("找不到任务")
+
+    def insights(self, key):
+        self.task(key)
+        with self.connect() as connection:
+            counts = Counter(json.loads(row["data"])["source"] for row in connection.execute(
+                "SELECT data FROM evidence WHERE task_id=?", (key,)
+            ))
+            rows = connection.execute(
+                "SELECT id, created_at, result FROM runs WHERE task_id=? AND mode='live' "
+                "ORDER BY created_at DESC,rowid DESC LIMIT 10", (key,)
+            ).fetchall()
+        return {
+            "evidence_count": sum(counts.values()),
+            "sources": [{"name": name, "count": count} for name, count in
+                        sorted(counts.items(), key=lambda entry: (-entry[1], entry[0].casefold()))[:5]],
+            "checks": [{"id": row["id"], "at": row["created_at"], "count": json.loads(row["result"])["total"]}
+                       for row in reversed(rows)],
+        }
+
+    def memories(self, key):
+        self.task(key)
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT id,text,created_at,updated_at FROM task_memory WHERE task_id=? ORDER BY created_at DESC,rowid DESC",
+                (key,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def memory(self, key, note_id):
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT id,text,created_at,updated_at FROM task_memory WHERE task_id=? AND id=?", (key, note_id)
+            ).fetchone()
+        if row is None:
+            raise InputError("找不到这条记忆。")
+        return dict(row)
+
+    def add_memory(self, key, text):
+        self.task(key)
+        note_id, stamp = uuid4().hex[:12], iso(now())
+        with self.connect() as connection:
+            connection.execute("INSERT INTO task_memory VALUES(?,?,?,?,?)", (key, note_id, text, stamp, stamp))
+        return {"id": note_id, "text": text, "created_at": stamp, "updated_at": stamp}
+
+    def update_memory(self, key, note_id, text):
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE task_memory SET text=?,updated_at=? WHERE task_id=? AND id=?", (text, iso(now()), key, note_id)
+            )
+            if cursor.rowcount != 1:
+                raise InputError("找不到这条记忆。")
+            return dict(connection.execute(
+                "SELECT id,text,created_at,updated_at FROM task_memory WHERE task_id=? AND id=?", (key, note_id)
+            ).fetchone())
+
+    def remove_memory(self, key, note_id):
+        with self.connect() as connection:
+            cursor = connection.execute("DELETE FROM task_memory WHERE task_id=? AND id=?", (key, note_id))
+            if cursor.rowcount != 1:
+                raise InputError("找不到这条记忆。")
 
     def set_active(self, key, active):
         with self.connect() as connection:
