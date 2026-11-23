@@ -198,7 +198,7 @@ async function refresh({ focus = false, editedRules = null } = {}) {
     nav(tasks, route, task?.plan.title);
     if (route.name === "home") renderHome(userTasks);
     else if (route.name === "overview") renderOverview();
-    else if (route.name === "inbox") renderInbox(inbox, delivery);
+    else if (route.name === "inbox") renderInbox(inbox, delivery, userTasks);
     else if (route.name === "events") renderEvents(events);
     else renderTask(task, route, { evidence, editedRules, insights });
     if (route.name === "overview" && focusComposerOnLoad) {
@@ -221,11 +221,14 @@ function nav(tasks, route, taskTitle) {
     [t("监测任务"), tasks.filter(task => !task.demo)],
     [t("演示任务"), tasks.filter(task => task.demo)],
   ];
+  const titles = new Map();
+  for (const task of tasks) titles.set(task.plan.title, (titles.get(task.plan.title) || 0) + 1);
   taskNav.innerHTML = groups.map(([label, items]) => items.length ? `
     <div class="task-group"><div class="side-heading">${label}</div>
       ${items.map(task => `<a href="${hrefFor(task.id)}" ${route.id === task.id ? 'aria-current="page"' : ""}>
         <span class="task-icon ${task.active ? "active-task" : ""}" aria-hidden="true"></span>
-        <span class="task-label" title="${escape(task.plan.title)}">${escape(task.plan.title)}</span>
+        <span class="task-copy"><span class="task-label" title="${escape(task.plan.title)}">${escape(task.plan.title)}</span>
+          ${titles.get(task.plan.title) > 1 && task.plan.goal ? `<span class="task-context" title="${escape(task.plan.goal)}">${escape(task.plan.goal)}</span>` : ""}</span>
       </a>`).join("")}
     </div>` : "").join("");
   document.querySelector("#crumb").textContent = route.name === "task"
@@ -264,6 +267,7 @@ function renderHome(tasks) {
       ${recent.length ? `<section class="home-recent" aria-label="${t("最近任务")}">
         <h2>${t("最近任务")}</h2><ul>${recent.map(task => `<li><a href="${hrefFor(task.id)}">
           ${icon("signal")}<span>${escape(task.plan.title)}</span>${icon("diagonal")}</a></li>`).join("")}</ul>
+        <a class="home-inbox-link" href="#inbox">${icon("inbox")}${t("今日情报")}${icon("diagonal")}</a>
       </section>` : ""}
     </div>
   </div>`;
@@ -528,29 +532,35 @@ async function requestPlan(form) {
   }
 }
 
-function renderInbox(inbox, delivery) {
+function renderInbox(inbox, delivery, tasks) {
   const priority = inbox.stories.filter(story => story.priority || story.focus.length).length;
   const failed = inbox.failures.filter(source => !source.recovered_at).length;
+  const needsSources = tasks.find(task => !task.plan.feeds.length && !task.plan.news_query);
   page.innerHTML = `<div class="inbox-title page-title">
     <div><p class="inbox-date">${icon("clock")} <time datetime="${escape(inbox.date)}">${escape(inbox.date)}</time> ${t("北京时间")}</p>
-      <h1>${t("今日情报收件箱")}</h1><p>${t("关注任务的当日报道与事件更新。")}</p></div>
+      <h1>${t("今日情报收件箱")}</h1></div>
     <div class="row task-actions">
       ${delivery.latest_day ? `<a class="button" href="/api/briefings/latest" download>${t("下载最新简报")}</a>` : ""}
       ${button(icon("bell") + t("提醒与简报"), "delivery-settings")}
-      ${button(t("刷新收件箱"), "refresh-inbox")}
+      ${button(t("刷新收件箱"), "refresh-inbox", inbox.stories.length > 0)}
     </div>
   </div>
   <div class="overview-metrics" aria-label="${t("今日概况")}">
     ${metric("inbox", t("今日进展"), inbox.stories.length)}
-    ${metric("signal", t("优先查看"), priority)}
-    ${metric("news", t("来源待检查"), failed)}
+    ${metric("signal", t("优先查看"), priority, priority ? "metric-priority" : "")}
+    ${metric("news", t("来源待检查"), failed, failed ? "metric-alert" : "")}
   </div>
   <div class="inbox-layout">
     <section class="inbox-stories"><div class="section-heading"><h2>${t("今日进展")}</h2>
       <span class="meta">${t("{count} 个关注任务", {count: inbox.task_count})}</span></div>
-      ${inbox.stories.length ? inbox.stories.map(inboxStory).join("") :
-        empty(inbox.task_count ? t("今天还没有可汇总的进展。有新记录或事件后会显示在这里。") : t("创建关注任务后，今天的进展会汇总到这里。"),
-          inbox.task_count ? "" : `<a class="button primary" href="#overview">${t("前往 Agent 工作台")}</a>`)}
+      ${inbox.stories.length ? inbox.stories.map(inboxStory).join("") : `<div class="card inbox-empty">
+        <div class="scene-icon">${icon("inbox")}</div>
+        <h3>${t("今天暂无进展")}</h3>
+        ${needsSources ? `<p>${t("为关注的任务选择信源，开始收集更新。")}</p>
+          <a class="button primary" href="${hrefFor(needsSources.id, "rules")}">${t("配置来源")}</a>`
+          : !inbox.task_count ? `<p>${t("创建关注任务后，今天的进展会汇总到这里。")}</p>
+            <a class="button primary" href="#overview">${t("前往 Agent 工作台")}</a>` : ""}
+      </div>`}
     </section>
     ${inboxSourceHealth(inbox)}
   </div>`;
@@ -625,6 +635,7 @@ function renderEvents(events) {
 function renderTask(task, route, { evidence, editedRules, insights }) {
   const tab = route.tab;
   const activeTab = tab === "event" ? "summary" : tab;
+  const needsSources = tab === "summary" && !task.plan.feeds.length && !task.plan.news_query && !insights.evidence_count;
   const tabs = { summary: t("研判概览"), rules: t("监测规则"), sources: t("证据库"), runs: t("运行记录") };
   const title = `<div class="page-title ${tab === "summary" ? "summary-page-title" : ""}"><div>
     <div class="row">${pill(t(scenarios[task.plan.scenario] || "自定义"))}${task.demo ? pill(t("合成演示"), "a") : ""}
@@ -633,7 +644,7 @@ function renderTask(task, route, { evidence, editedRules, insights }) {
     </div><div class="row task-actions">
       ${button(task.active ? t("暂停") : t("启用方案"), "toggle-active", !task.active)}
       ${button(t("试跑规则"), "trial")}
-      ${task.active ? button(t("立即检查"), "live", true) : ""}
+      ${task.active ? button(t("立即检查"), "live", !needsSources) : ""}
     </div></div>`;
   const tabbar = `<nav class="tabs" aria-label="${t("任务视图")}">${Object.entries(tabs).map(([key, label]) =>
     `<a href="${hrefFor(task.id, key)}" ${key === activeTab ? 'aria-current="page"' : ""}>${label}</a>`).join("")}</nav>`;
@@ -662,7 +673,7 @@ function summaryTab(task, insights) {
     ${insights.evidence_count ? sourceChart(task, insights) : `<section class="card overview-source-setup">
       <span class="scene-icon">${icon("news")}</span><div><h2>${t("来源分布")}</h2>
       <p class="meta">${configured ? t("待采集证据") : t("尚未选择信源")}</p></div>
-      <a class="button" href="${hrefFor(task.id, configured ? "sources" : "rules")}">${configured ? t("证据库") : t("配置来源")}</a>
+      <a class="button ${configured ? "" : "primary"}" href="${hrefFor(task.id, configured ? "sources" : "rules")}">${configured ? t("证据库") : t("配置来源")}</a>
     </section>`}
     ${events.length ? section(t("已归档的事件"), events.map(eventRow).join("")) : ""}
     ${task.runs.length ? `<a class="overview-run-link" href="${hrefFor(task.id, "runs")}">${icon("clock")}${t("查看运行记录")}${icon("diagonal")}</a>` : ""}
@@ -711,8 +722,8 @@ function checkChart(checks) {
   const values = points.map(point => `<li><time datetime="${escape(point.at)}">${stamp(point.at)}</time><strong>${point.count}</strong></li>`).join("");
   return `<section class="card insight-chart">${header}
     <svg class="check-chart" viewBox="0 0 448 120" role="img" aria-label="${title}">
-      <defs><linearGradient id="check-chart-fill" x2="0" y2="1"><stop offset="0" stop-color="#8875ff" stop-opacity=".27"/>
-        <stop offset="1" stop-color="#8875ff" stop-opacity=".03"/></linearGradient></defs>
+      <defs><linearGradient id="check-chart-fill" x2="0" y2="1"><stop offset="0" stop-color="#299b90" stop-opacity=".27"/>
+        <stop offset="1" stop-color="#299b90" stop-opacity=".03"/></linearGradient></defs>
       ${ticks.map(count => `<line x1="39" x2="431" y1="${yFor(count)}" y2="${yFor(count)}" />
         <text x="30" y="${yFor(count) + 4}" text-anchor="end">${count}</text>`).join("")}
       ${points.length > 1 ? `<polygon points="${points[0].x},${baseline} ${path} ${points.at(-1).x},${baseline}" fill="url(#check-chart-fill)"/>

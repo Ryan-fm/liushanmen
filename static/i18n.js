@@ -1,4 +1,6 @@
 const english = {
+  "今天暂无进展": "No developments today",
+  "为关注的任务选择信源，开始收集更新。": "Choose sources for a followed task to start collecting updates.",
   "下载最新简报": "Download latest briefing",
   "提醒与简报": "Alerts and briefings",
   "重要变化桌面提醒": "Desktop alerts for important changes",
